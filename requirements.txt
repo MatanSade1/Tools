@@ -1,0 +1,16 @@
+# GDPR Request Automation Tool - Python Dependencies
+
+# BigQuery operations
+google-cloud-bigquery>=3.11.0
+
+# HTTP requests for API integrations
+requests>=2.31.0
+
+# Configuration management
+pyyaml>=6.0
+
+# Logging and utilities
+python-dateutil>=2.8.2
+
+# CLI interface
+click>=8.1.0

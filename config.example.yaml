@@ -1,0 +1,35 @@
+# GDPR Request Automation Tool - Configuration File
+# Copy this file to config.yaml and fill in your credentials
+
+# Mixpanel Configuration
+mixpanel:
+  project_id: "YOUR_MIXPANEL_PROJECT_ID"
+  token: "YOUR_MIXPANEL_PROJECT_TOKEN"
+  api_secret: "YOUR_MIXPANEL_API_SECRET"
+
+# Singular Configuration
+singular:
+  api_key: "YOUR_SINGULAR_API_KEY"
+
+# BigQuery Configuration
+bigquery:
+  project_id: "YOUR_GCP_PROJECT_ID"
+
+  # Optional: Path to service account credentials JSON file
+  # If not provided, will use default credentials from environment
+  credentials_path: "/path/to/service-account-key.json"
+
+  # Status tracking table (format: dataset.table)
+  status_table: "gdpr.deletion_status"
+
+  # List of tables to delete user data from (format: dataset.table)
+  tables_to_delete:
+    - "analytics.user_events"
+    - "analytics.user_profiles"
+    - "marketing.user_campaigns"
+    # Add more tables as needed
+
+# Logging Configuration
+logging:
+  level: "INFO"  # DEBUG, INFO, WARNING, ERROR, CRITICAL
+  file: "gdpr_tool.log"

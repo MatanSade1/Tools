@@ -1,0 +1,8 @@
+# Example user list file
+# One user ID per line
+# Lines starting with # are ignored
+
+user123
+user456
+user789
+abc-def-ghi-123
