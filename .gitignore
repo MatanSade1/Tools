@@ -1,6 +1,13 @@
-# Environment variables
+# Environment variables and secrets
 .env
 .env.local
+.env.*
+# Allow .env.example as a template
+!.env.example
+# But ignore other .env files
+*.env
+secrets/
+*.secret
 
 # Python
 __pycache__/
