@@ -158,13 +158,45 @@ def format_slack_message(
     return message
 
 
+def get_slack_webhook_url(channel: str) -> str:
+    """
+    Get the Slack webhook URL for a specific channel.
+    
+    Args:
+        channel: Channel name (e.g., 'data-alerts-sandbox', 'data-alerts-critical', 'data-alerts-non-critical')
+                 Can include or exclude the '#' prefix
+    
+    Returns:
+        Full webhook URL for the channel
+    """
+    base_url = "https://hooks.slack.com/services/T03SBHW3W4S"
+    
+    channel_tokens = {
+        'data-alerts-sandbox': 'B089W8NRF1A/fjiKtqyUekCbnxLRnFRRx3cp',
+        'data-alerts-critical': 'B08C1BKGYJ3/g3o3p9JNKPVybiIQIxUp77Cy',
+        'data-alerts-non-critical': 'B08CUJ7PMDX/YXoVzLajPWgyYcqEvMvzQyGL'
+    }
+    
+    # Handle channel names with or without #
+    channel_clean = channel.lstrip('#')
+    
+    token = channel_tokens.get(channel_clean)
+    if not token:
+        print(f"Warning: No webhook token found for channel {channel}, using sandbox channel")
+        token = channel_tokens['data-alerts-sandbox']
+    
+    return f"{base_url}/{token}"
+
+
 def send_rt_alert(
     meaningful_name: str,
     event_name: str,
     event_count: int,
     threshold: int,
     channel: Optional[str] = None,
-    webhook_url: Optional[str] = None
+    webhook_url: Optional[str] = None,
+    start_time: Optional[datetime] = None,
+    end_time: Optional[datetime] = None
 ):
     """
     Send RT alert to Slack channel with custom format.
@@ -174,23 +206,28 @@ def send_rt_alert(
         event_name: Name of the event that triggered the alert
         event_count: Current count of events
         threshold: Threshold that was exceeded
-        channel: Slack channel to send to (overrides default webhook channel)
-        webhook_url: Custom webhook URL (overrides default)
+        channel: Slack channel to send to (required if webhook_url not provided)
+        webhook_url: Custom webhook URL (optional, overrides channel-based lookup)
+        start_time: Start time of the aggregation window (optional)
+        end_time: End time of the aggregation window (optional)
     """
-    config = get_config()
-    webhook = webhook_url or config.get("slack_webhook_url")
-    
-    if not webhook:
-        print("Warning: No Slack webhook URL configured, skipping alert")
+    # Use provided webhook_url or get channel-specific webhook
+    if webhook_url:
+        webhook = webhook_url
+    elif channel:
+        webhook = get_slack_webhook_url(channel)
+    else:
+        print("Warning: No Slack webhook URL or channel configured, skipping alert")
         return
     
-    # Format message
+    # Format message (remove channel from message since webhook URL determines channel)
     message = format_rt_alert_message(
         meaningful_name=meaningful_name,
         event_name=event_name,
         event_count=event_count,
         threshold=threshold,
-        channel=channel
+        start_time=start_time,
+        end_time=end_time
     )
     
     # Send to Slack
@@ -201,7 +238,7 @@ def send_rt_alert(
             timeout=10
         )
         response.raise_for_status()
-        print(f"Successfully sent RT Slack alert for {event_name}")
+        print(f"Successfully sent RT Slack alert for {event_name} to {channel or 'custom webhook'}")
     except requests.exceptions.RequestException as e:
         print(f"Error sending RT Slack alert: {e}")
         raise
@@ -212,24 +249,35 @@ def format_rt_alert_message(
     event_name: str,
     event_count: int,
     threshold: int,
-    channel: Optional[str] = None
+    start_time: Optional[datetime] = None,
+    end_time: Optional[datetime] = None
 ) -> Dict:
     """
     Format RT alert data as Slack message.
     
-    Format includes: meaningful name, current count, time, event_name, threshold
+    Format includes: meaningful name, current count, start/end time windows, event_name, threshold
     
     Args:
         meaningful_name: Human-readable name for the alert
         event_name: Name of the event
         event_count: Current count of events
         threshold: Threshold that was exceeded
-        channel: Optional channel override
+        start_time: Start time of the aggregation window (optional)
+        end_time: End time of the aggregation window (optional)
     
     Returns:
         Formatted Slack message dict
     """
-    current_time = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')
+    # Format start and end times separately
+    if start_time:
+        start_time_str = start_time.strftime('%Y-%m-%d %H:%M:%S UTC')
+    else:
+        start_time_str = "N/A"
+    
+    if end_time:
+        end_time_str = end_time.strftime('%Y-%m-%d %H:%M:%S UTC')
+    else:
+        end_time_str = "N/A"
     
     # Build blocks with required format
     blocks = [
@@ -253,7 +301,11 @@ def format_rt_alert_message(
                 },
                 {
                     "type": "mrkdwn",
-                    "text": f"*Time:*\n{current_time}"
+                    "text": f"*Start Time Window:*\n{start_time_str}"
+                },
+                {
+                    "type": "mrkdwn",
+                    "text": f"*End Time Window:*\n{end_time_str}"
                 },
                 {
                     "type": "mrkdwn",
@@ -270,10 +322,6 @@ def format_rt_alert_message(
     message = {
         "blocks": blocks
     }
-    
-    # Add channel override if provided (for Slack apps with channel parameter support)
-    if channel:
-        message["channel"] = channel
     
     return message
 

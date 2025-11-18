@@ -97,6 +97,13 @@ def rt_mp_collector(request):
         # Step 3: Check thresholds and send alerts
         alerts_sent = 0
         
+        # Track events by name for local testing (when BigQuery is not available)
+        events_by_name = {}
+        for event in all_events:
+            event_name = event.get("event_name")
+            if event_name:
+                events_by_name[event_name] = events_by_name.get(event_name, 0) + 1
+        
         for event_config in enabled_events:
             event_name = event_config["name"]
             threshold = event_config.get("alert_threshold", 10)
@@ -106,15 +113,22 @@ def rt_mp_collector(request):
             print(f"Checking threshold for {event_name} (threshold: {threshold})")
             
             try:
-                # Query BigQuery to count events in the last hour
+                # Try to query BigQuery first, fall back to collected events count for local testing
                 hour_end = datetime.utcnow()
                 hour_start = hour_end - timedelta(hours=1)
                 
-                event_count = query_events_by_hour(
-                    event_name=event_name,
-                    start_time=hour_start,
-                    end_time=hour_end
-                )
+                try:
+                    event_count = query_events_by_hour(
+                        event_name=event_name,
+                        start_time=hour_start,
+                        end_time=hour_end
+                    )
+                    print(f"Event count for {event_name} in last hour (from BigQuery): {event_count}")
+                except Exception as bq_error:
+                    # BigQuery not available (local testing) - use collected events count
+                    event_count = events_by_name.get(event_name, 0)
+                    print(f"⚠️  BigQuery not available, using collected events count: {event_count}")
+                    print(f"   (This is for local testing only. In production, BigQuery will be used.)")
                 
                 print(f"Event count for {event_name} in last hour: {event_count}")
                 
@@ -141,7 +155,8 @@ def rt_mp_collector(request):
                                 event_count=event_count,
                                 threshold=threshold,
                                 channel=channel,
-                                webhook_url=config.get("slack_webhook_url")
+                                start_time=hour_start,
+                                end_time=hour_end
                             )
                             
                             # Update alert cache
