@@ -1,0 +1,13 @@
+{
+  "events": [
+    {
+      "name": "impression_error_null_pointer_detected",
+      "enabled": true,
+      "alert_threshold": 10,
+      "alert_channel": "#data-alerts-sandbox",
+      "meaningful_name": "Null Pointer Error Detected"
+    }
+  ],
+  "collection_frequency_minutes": 15
+}
+
