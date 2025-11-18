@@ -155,8 +155,23 @@ gcloud scheduler jobs create http rt-alerts-tool-job \
     --attempt-deadline=120s \
     || echo "RT Alerts Tool job may already exist"
 
-# Prepare rt-mp-collector
-RT_MP_COLLECTOR_DIR=$(prepare_function "rt-mp-collector")
+# Prepare rt-mp-collector (from alerts project)
+RT_MP_COLLECTOR_DIR="$TMP_DIR/rt-mp-collector"
+mkdir -p "$RT_MP_COLLECTOR_DIR"
+
+# Copy function files from alerts/rt-mp-collector
+cp -r "./alerts/rt-mp-collector"/* "$RT_MP_COLLECTOR_DIR/" 2>/dev/null || true
+
+# Copy shared directory
+cp -r ./shared "$RT_MP_COLLECTOR_DIR/"
+
+# Copy alerts config directory
+mkdir -p "$RT_MP_COLLECTOR_DIR/config"
+cp -r ./alerts/config/* "$RT_MP_COLLECTOR_DIR/config/" 2>/dev/null || true
+
+# Also copy main config directory (for backward compatibility)
+cp -r ./config/* "$RT_MP_COLLECTOR_DIR/config/" 2>/dev/null || true
+
 echo "Prepared rt-mp-collector in: $RT_MP_COLLECTOR_DIR"
 
 # Build environment variables for rt-mp-collector

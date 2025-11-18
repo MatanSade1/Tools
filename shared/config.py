@@ -174,6 +174,7 @@ def load_rt_mp_events_config() -> Dict:
     
     # Try local file (multiple possible paths for Cloud Functions)
     possible_paths = [
+        os.path.join(os.path.dirname(__file__), "..", "alerts", "config", "rt_mp_events_config.json"),
         os.path.join(os.path.dirname(__file__), "..", "config", "rt_mp_events_config.json"),
         os.path.join(os.path.dirname(__file__), "config", "rt_mp_events_config.json"),
         "config/rt_mp_events_config.json",
