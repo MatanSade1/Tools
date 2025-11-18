@@ -1,11 +1,11 @@
 {
   "events": [
     {
-      "name": "impression_error_null_pointer_detected",
+      "name": "merge",
       "enabled": true,
-      "alert_threshold": 10,
+      "alert_threshold": 5,
       "alert_channel": "#data-alerts-sandbox",
-      "meaningful_name": "Null Pointer Error Detected"
+      "meaningful_name": "Merge Events"
     }
   ],
   "collection_frequency_minutes": 15

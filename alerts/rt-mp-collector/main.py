@@ -2,6 +2,7 @@
 import os
 import json
 import requests
+import base64
 from datetime import datetime, timedelta
 from typing import List, Dict
 from shared.config import get_config, get_rt_mp_config
@@ -50,7 +51,12 @@ def rt_mp_collector(request):
         end_time = datetime.utcnow()
         start_time = end_time - timedelta(minutes=collection_frequency)
         
+        # Ensure we don't query future dates (Mixpanel doesn't allow this)
+        if start_time > end_time:
+            start_time = end_time - timedelta(minutes=1)
+        
         print(f"Collecting events from {start_time} to {end_time}")
+        print(f"Date range: {start_time.strftime('%Y-%m-%d')} to {end_time.strftime('%Y-%m-%d')}")
         
         all_events = []
         
@@ -60,11 +66,12 @@ def rt_mp_collector(request):
             print(f"Collecting events for: {event_name}")
             
             try:
+                # Pass the full config to allow fetch_mixpanel_events to choose auth method
                 events = fetch_mixpanel_events(
                     event_name=event_name,
                     start_time=start_time,
                     end_time=end_time,
-                    api_secret=config["mixpanel_api_secret"],
+                    api_secret=config.get("mixpanel_api_secret"),  # May be None if using Service Account
                     project_id=config["mixpanel_project_id"]
                 )
                 
@@ -189,60 +196,148 @@ def fetch_mixpanel_events(
     Returns:
         List of event dictionaries
     """
+    # Validate date range
+    now = datetime.utcnow()
+    if start_time > now:
+        raise ValueError(f"Start time {start_time} is in the future")
+    if end_time > now:
+        print(f"Warning: End time {end_time} is in the future, adjusting to now")
+        end_time = now
+    if end_time < start_time:
+        raise ValueError(f"End time {end_time} is before start time {start_time}")
+    
     # Mixpanel Export API endpoint
-    base_url = "https://mixpanel.com/api/2.0/export"
+    # Use data.mixpanel.com (matching working example)
+    # For EU: data-eu.mixpanel.com, For India: data-in.mixpanel.com
+    base_url = "https://data.mixpanel.com/api/2.0/export"
     
     # Convert to date strings (YYYY-MM-DD format)
+    # Mixpanel Export API requires dates, not timestamps
     from_date = start_time.strftime("%Y-%m-%d")
     to_date = end_time.strftime("%Y-%m-%d")
     
+    # Ensure we're not querying future dates
+    today = now.strftime("%Y-%m-%d")
+    if from_date > today:
+        from_date = today
+    if to_date > today:
+        to_date = today
+    
     all_events = []
     
-    # Mixpanel Export API returns all events for the date range
-    # We need to filter by event name and timestamp after fetching
+    # Mixpanel Export API parameters
+    # Optionally filter by event name in query (more efficient)
     params = {
         "from_date": from_date,
         "to_date": to_date,
-        "format": "json"
+        "event": json.dumps([event_name])  # Filter by event name in query string
     }
     
-    # Mixpanel uses basic auth with API secret
+    # Mixpanel Export API authentication
+    # Based on working example: use base64 encoded Basic auth in header
+    if not api_secret or not api_secret.strip():
+        raise ValueError("Mixpanel API secret is required. Set MIXPANEL_API_SECRET")
+    
+    # Base64 encode the API secret for Basic auth (matching working example)
+    auth = base64.b64encode(f"{api_secret}:".encode()).decode()
+    api_secret_preview = api_secret[:8] + "..." if len(api_secret) > 8 else api_secret
+    print(f"Using API Secret authentication: {api_secret_preview} (length: {len(api_secret)})")
+    
     max_retries = 3
     retry_count = 0
     
     while retry_count < max_retries:
         try:
+            # Build full URL for debugging
+            full_url = f"{base_url}?from_date={from_date}&to_date={to_date}&event={params['event']}"
+            print(f"Fetching from Mixpanel: {from_date} to {to_date}")
+            print(f"API endpoint: {base_url}")
+            print(f"Event filter: {event_name}")
+            
+            # Mixpanel Export API uses HTTP Basic Auth in header (matching working example)
+            # Use base64 encoded Basic auth in Authorization header
             response = requests.get(
                 base_url,
                 params=params,
-                auth=(api_secret, ""),
-                timeout=60
+                headers={
+                    "Authorization": f"Basic {auth}",
+                    "Accept": "text/plain",
+                    "User-Agent": "RT-MP-Collector/1.0"
+                },
+                stream=True,  # Enable streaming for large responses
+                timeout=300  # Longer timeout for streaming
             )
             
             if response.status_code == 200:
-                # Mixpanel export API returns newline-delimited JSON
-                lines = response.text.strip().split("\n")
-                if not lines or lines == [""]:
-                    break
-                
-                # Filter events by name and timestamp
+                # Mixpanel export API returns newline-delimited JSON (streamed)
+                # Process line by line for efficiency (matching working example)
                 start_timestamp = int(start_time.timestamp())
                 end_timestamp = int(end_time.timestamp())
                 
-                for line in lines:
-                    if line.strip():
-                        try:
-                            event = json.loads(line)
-                            # Filter by event name
-                            if event.get("event") == event_name:
-                                # Filter by timestamp within our window
-                                event_time = event.get("properties", {}).get("time")
-                                if event_time and start_timestamp <= event_time <= end_timestamp:
-                                    all_events.append(transform_mixpanel_event(event))
-                        except (json.JSONDecodeError, KeyError, TypeError):
-                            continue
+                event_count = 0
+                for line in response.iter_lines():
+                    if not line:
+                        continue
+                    
+                    try:
+                        event = json.loads(line)
+                        event_count += 1
+                        
+                        # Filter by event name (though we already filtered in query)
+                        if event.get("event") == event_name:
+                            # Filter by timestamp within our window
+                            event_time = event.get("properties", {}).get("time")
+                            if event_time and start_timestamp <= event_time <= end_timestamp:
+                                all_events.append(transform_mixpanel_event(event))
+                    except (json.JSONDecodeError, KeyError, TypeError) as e:
+                        continue
                 
+                print(f"Processed {event_count} events from Mixpanel, {len(all_events)} matched criteria")
                 break
+                
+            elif response.status_code == 400:
+                # Bad Request - log detailed error
+                error_msg = f"Mixpanel API returned 400 Bad Request"
+                try:
+                    error_body = response.text
+                    error_msg += f": {error_body}"
+                    print(f"❌ {error_msg}")
+                    print(f"   URL: {full_url}")
+                    print(f"   Request params: {params}")
+                    print(f"   Response headers: {dict(response.headers)}")
+                except:
+                    pass
+                
+                # Check if it's an authentication error
+                if "unauthorized" in response.text.lower() or "authentication" in response.text.lower():
+                    raise ValueError(f"Mixpanel API authentication failed. Check your API secret.")
+                
+                # For 400 errors, don't retry - the request is malformed
+                raise requests.exceptions.HTTPError(f"{error_msg}")
+                
+            elif response.status_code == 401:
+                # Unauthorized - authentication issue
+                error_detail = "Mixpanel API authentication failed (401)."
+                try:
+                    error_body = response.text[:200]
+                    if "AuthenticationRequired" in error_body or "Authentication required" in error_body:
+                        error_detail += "\n   The API secret may be incorrect or invalid."
+                        error_detail += "\n   Please verify:"
+                        error_detail += "\n   1. You're using the Export API Secret (not Service Account secret)"
+                        error_detail += "\n   2. Go to: https://mixpanel.com/project/{}/settings".format(project_id)
+                        error_detail += "\n   3. Navigate to 'Project Settings' → 'Service Accounts'"
+                        error_detail += "\n   4. Look for 'Export API Secret' (different from Service Account secret)"
+                        error_detail += "\n   5. Ensure the secret has 'Export API' permissions enabled"
+                        error_detail += f"\n   6. Your project ID is: {project_id}"
+                        error_detail += "\n   7. Note: Service Account secrets use different authentication"
+                        error_detail += "\n   8. The Export API requires a specific Export API Secret"
+                except:
+                    pass
+                raise ValueError(error_detail)
+                
+            elif response.status_code == 403:
+                # Forbidden - permission issue
+                raise ValueError("Mixpanel API access forbidden (403). Check your API secret and project permissions.")
                 
             elif response.status_code == 429:
                 # Rate limited, wait and retry
@@ -253,13 +348,26 @@ def fetch_mixpanel_events(
                 retry_count += 1
                 continue
             else:
+                # Other errors - log and raise
+                error_msg = f"Mixpanel API returned {response.status_code}"
+                try:
+                    error_body = response.text[:500]  # First 500 chars
+                    error_msg += f": {error_body}"
+                except:
+                    pass
+                print(f"❌ {error_msg}")
                 response.raise_for_status()
                 
+        except requests.exceptions.HTTPError as e:
+            # Don't retry HTTP errors (4xx, 5xx) except 429
+            raise
         except requests.exceptions.RequestException as e:
             retry_count += 1
             if retry_count >= max_retries:
+                print(f"❌ Failed after {max_retries} retries: {e}")
                 raise
             import time
+            print(f"⚠️  Request failed, retrying ({retry_count}/{max_retries})...")
             time.sleep(5)
     
     return all_events

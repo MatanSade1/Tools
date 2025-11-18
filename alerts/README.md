@@ -72,6 +72,47 @@ Option 2 - Environment variable (less secure):
 export MIXPANEL_API_SECRET="your-mixpanel-api-secret"
 ```
 
+**⚠️ Important: Mixpanel Authentication Credentials**
+
+Mixpanel has different credential types for different purposes:
+
+1. **Project Token** (`0e73d8fa...`) - Used for tracking/importing events (client-side SDKs)
+   - ❌ **Does NOT work** with Export API
+   - Used for sending events TO Mixpanel, not reading FROM Mixpanel
+
+2. **Export API Secret** - Used specifically for Export API
+   - Get from: Project Settings → Service Accounts → Export API Secret
+   - Format: Long alphanumeric string
+   - Used with Basic Auth: `auth=(secret, "")`
+
+3. **Service Account** (RECOMMENDED) - Username + Secret pair
+   - Get from: Project Settings → Service Accounts → Create Service Account
+   - Provides: Username and Secret
+   - Used with Basic Auth: `auth=(username, secret)`
+   - More secure and recommended by Mixpanel
+
+**To get the correct credentials:**
+
+1. Go to: https://mixpanel.com/project/2991947/settings
+2. Navigate to: **Project Settings** → **Service Accounts**
+3. **Option A (Recommended)**: Create a Service Account
+   - Click "Add Service Account"
+   - Copy the **Username** and **Secret**
+   - Set environment variables:
+     ```bash
+     export MIXPANEL_SERVICE_ACCOUNT_USERNAME="your-username"
+     export MIXPANEL_SERVICE_ACCOUNT_SECRET="your-secret"
+     ```
+4. **Option B**: Use Export API Secret
+   - Look for "Export API Secret" section
+   - Copy the secret
+   - Set environment variable:
+     ```bash
+     export MIXPANEL_API_SECRET="your-export-api-secret"
+     ```
+
+**Note**: Project Tokens (like `0e73d8fa8567c5bf2820b408701fa7be`) cannot be used with the Export API.
+
 **Optional (have defaults):**
 ```bash
 export RT_MP_DATASET="mixpanel_data"    # Default
@@ -103,6 +144,86 @@ Edit `alerts/config/rt_mp_events_config.json` to configure:
 - Alert thresholds (events per hour)
 - Slack channels
 - Collection frequency
+
+## Local Development
+
+### Quick Start
+
+**Option 1: Use the automated setup script (recommended)**
+```bash
+./alerts/run-local.sh
+```
+
+This script will:
+- ✅ Create a virtual environment (if needed)
+- ✅ Install all dependencies
+- ✅ Check for .env file and create from template if needed
+- ✅ Load environment variables
+- ✅ Verify GCP authentication
+- ✅ Check required environment variables
+- ✅ Run the function locally
+
+**Option 2: Manual setup**
+```bash
+# Create and activate virtual environment
+python3 -m venv venv
+source venv/bin/activate
+
+# Install dependencies
+pip install --upgrade pip
+pip install -r requirements.txt
+pip install -r alerts/rt-mp-collector/requirements.txt
+
+# Set up environment variables
+source .env  # or export them manually
+
+# Authenticate with GCP (required for BigQuery access)
+gcloud auth application-default login
+
+# Run the function
+python3 alerts/test-local.py
+```
+
+**Option 3: Direct Python call**
+```python
+from alerts.rt_mp_collector.main import rt_mp_collector
+result = rt_mp_collector(None)
+print(result)
+```
+
+### Prerequisites for Local Development
+
+- Python 3.8 or higher
+- Google Cloud SDK installed and authenticated
+- Environment variables set (via .env file or exports)
+- GCP Application Default Credentials configured (`gcloud auth application-default login`)
+
+### Local Testing Notes
+
+⚠️ **Important:** When running locally:
+- Events will be stored in your **actual** BigQuery table
+- Slack alerts will be sent to your **actual** configured channel
+- Use test channels/thresholds during development to avoid spam
+- Consider temporarily disabling events in config (`"enabled": false`) for testing
+
+### Troubleshooting Local Development
+
+**Import errors:**
+- Make sure you're in the project root directory
+- Ensure virtual environment is activated
+- Check that all dependencies are installed
+
+**GCP authentication errors:**
+- Run: `gcloud auth application-default login`
+- Verify: `gcloud auth application-default print-access-token`
+
+**BigQuery permission errors:**
+- Ensure your user account has BigQuery permissions
+- Check: `gcloud projects get-iam-policy yotam-395120`
+
+**Environment variable errors:**
+- Verify .env file exists and has correct values
+- Check: `source .env && echo $GCP_PROJECT_ID`
 
 ## Next Steps
 

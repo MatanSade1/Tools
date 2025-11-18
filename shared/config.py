@@ -106,6 +106,10 @@ def get_config() -> Dict:
     Priority for secrets:
     1. Secret Manager (if MIXPANEL_API_SECRET_NAME is set)
     2. Environment variable (MIXPANEL_API_SECRET)
+    
+    For Service Account authentication:
+    - MIXPANEL_SERVICE_ACCOUNT_USERNAME (Service Account username)
+    - MIXPANEL_SERVICE_ACCOUNT_SECRET (Service Account secret)
     """
     project_id = os.getenv("GCP_PROJECT_ID")
     
@@ -119,8 +123,14 @@ def get_config() -> Dict:
     if not mixpanel_api_secret:
         mixpanel_api_secret = os.getenv("MIXPANEL_API_SECRET")
     
+    # Service Account credentials (alternative to API secret)
+    service_account_username = os.getenv("MIXPANEL_SERVICE_ACCOUNT_USERNAME")
+    service_account_secret = os.getenv("MIXPANEL_SERVICE_ACCOUNT_SECRET")
+    
     return {
         "mixpanel_api_secret": mixpanel_api_secret,
+        "mixpanel_service_account_username": service_account_username,
+        "mixpanel_service_account_secret": service_account_secret,
         "mixpanel_project_id": os.getenv("MIXPANEL_PROJECT_ID"),
         "gcp_project_id": project_id,
         "bigquery_dataset": os.getenv("BIGQUERY_DATASET", "mixpanel_data"),
