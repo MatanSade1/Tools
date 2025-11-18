@@ -1,0 +1,2 @@
+"""GDPR Request Handler module."""
+

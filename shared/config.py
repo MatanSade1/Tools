@@ -127,6 +127,16 @@ def get_config() -> Dict:
     service_account_username = os.getenv("MIXPANEL_SERVICE_ACCOUNT_USERNAME")
     service_account_secret = os.getenv("MIXPANEL_SERVICE_ACCOUNT_SECRET")
     
+    # Try Secret Manager first if secret name is provided for Slack Bot Token
+    slack_bot_token_name = os.getenv("SLACK_BOT_TOKEN_NAME")
+    slack_bot_token = None
+    if slack_bot_token_name and project_id:
+        slack_bot_token = get_secret(slack_bot_token_name, project_id)
+    
+    # Fall back to environment variable
+    if not slack_bot_token:
+        slack_bot_token = os.getenv("SLACK_BOT_TOKEN")
+    
     return {
         "mixpanel_api_secret": mixpanel_api_secret,
         "mixpanel_service_account_username": service_account_username,
@@ -135,9 +145,11 @@ def get_config() -> Dict:
         "gcp_project_id": project_id,
         "bigquery_dataset": os.getenv("BIGQUERY_DATASET", "mixpanel_data"),
         "bigquery_table": os.getenv("BIGQUERY_TABLE", "mixpanel_events"),
-        "rt_mp_dataset": os.getenv("RT_MP_DATASET", "mixpanel_data"),
+        "rt_mp_dataset": os.getenv("RT_MP_DATASET", "peerplay"),
         "rt_mp_table": os.getenv("RT_MP_TABLE", "rt_mp_events"),
         "slack_webhook_url": os.getenv("SLACK_WEBHOOK_URL"),
+        "slack_bot_token": slack_bot_token,
+        "gdpr_slack_channel": os.getenv("GDPR_SLACK_CHANNEL", "users-to-delete-their-personal-data"),
     }
 
 
@@ -183,22 +195,32 @@ def load_rt_mp_events_config() -> Dict:
             # Fall through to file
     
     # Try local file (multiple possible paths for Cloud Functions)
+    # Priority: config/rt_mp_events_config.json (relative to function root) first
     possible_paths = [
-        os.path.join(os.path.dirname(__file__), "..", "alerts", "config", "rt_mp_events_config.json"),
-        os.path.join(os.path.dirname(__file__), "..", "config", "rt_mp_events_config.json"),
-        os.path.join(os.path.dirname(__file__), "config", "rt_mp_events_config.json"),
-        "config/rt_mp_events_config.json",
-        "/config/rt_mp_events_config.json",
+        "config/rt_mp_events_config.json",  # First: relative to function root (most common in deployed functions)
+        os.path.join(os.path.dirname(__file__), "..", "config", "rt_mp_events_config.json"),  # Second: relative to shared/
+        os.path.join(os.path.dirname(__file__), "config", "rt_mp_events_config.json"),  # Third: in shared/config/
+        os.path.join(os.path.dirname(__file__), "..", "alerts", "config", "rt_mp_events_config.json"),  # Fourth: alerts/config/
+        "/config/rt_mp_events_config.json",  # Fifth: absolute path
     ]
     
+    print("Attempting to load RT config from possible paths:")
     for config_path in possible_paths:
+        print(f"  Trying: {config_path}")
         if os.path.exists(config_path):
             try:
+                print(f"  ✅ Found config at: {config_path}")
                 with open(config_path, "r") as f:
-                    return json.load(f)
+                    config = json.load(f)
+                    print(f"  ✅ Successfully loaded RT config with {len(config.get('events', []))} events")
+                    return config
             except Exception as e:
-                print(f"Error loading RT config file {config_path}: {e}")
+                print(f"  ❌ Error loading RT config file {config_path}: {e}")
                 continue
+        else:
+            print(f"  ⚠️  Path does not exist: {config_path}")
+    
+    print("⚠️  WARNING: Could not find rt_mp_events_config.json in any expected location, using defaults")
     
     # Default fallback
     return {

@@ -3,7 +3,7 @@ import os
 import json
 import requests
 from typing import Dict, List, Optional
-from datetime import datetime
+from datetime import datetime, date
 from shared.config import get_config
 
 
@@ -324,4 +324,173 @@ def format_rt_alert_message(
     }
     
     return message
+
+
+def get_slack_bot_token() -> Optional[str]:
+    """
+    Get Slack Bot Token from configuration.
+    
+    Returns:
+        Slack Bot Token (OAuth token starting with xoxb-) or None
+    """
+    config = get_config()
+    return config.get("slack_bot_token")
+
+
+def read_slack_channel_messages(
+    channel_name: str,
+    start_date: date,
+    end_date: date
+) -> List[Dict]:
+    """
+    Read messages from a Slack channel using Slack Web API.
+    
+    Args:
+        channel_name: Name of the channel (with or without #)
+        start_date: Start date for filtering messages (inclusive)
+        end_date: End date for filtering messages (inclusive)
+    
+    Returns:
+        List of message dictionaries with keys: text, ts, user, reactions, etc.
+    """
+    try:
+        from slack_sdk import WebClient
+    except ImportError:
+        raise ImportError("slack-sdk is required. Install it with: pip install slack-sdk")
+    
+    bot_token = get_slack_bot_token()
+    if not bot_token:
+        raise ValueError("SLACK_BOT_TOKEN or SLACK_BOT_TOKEN_NAME must be configured")
+    
+    client = WebClient(token=bot_token)
+    
+    # Clean channel name (remove # if present)
+    channel_clean = channel_name.lstrip('#')
+    
+    # Get channel ID
+    try:
+        channels_response = client.conversations_list(types="public_channel,private_channel")
+        channel_id = None
+        for channel in channels_response["channels"]:
+            if channel["name"] == channel_clean:
+                channel_id = channel["id"]
+                break
+        
+        if not channel_id:
+            raise ValueError(f"Channel '{channel_name}' not found")
+    except Exception as e:
+        raise ValueError(f"Error finding channel '{channel_name}': {e}")
+    
+    # Convert dates to timestamps
+    start_timestamp = datetime.combine(start_date, datetime.min.time()).timestamp()
+    end_timestamp = datetime.combine(end_date, datetime.max.time()).timestamp()
+    
+    all_messages = []
+    cursor = None
+    
+    # Fetch messages with pagination
+    while True:
+        try:
+            params = {
+                "channel": channel_id,
+                "oldest": str(int(start_timestamp)),
+                "latest": str(int(end_timestamp)),
+                "limit": 200
+            }
+            if cursor:
+                params["cursor"] = cursor
+            
+            response = client.conversations_history(**params)
+            messages = response.get("messages", [])
+            all_messages.extend(messages)
+            
+            # Check if there are more pages
+            response_metadata = response.get("response_metadata", {})
+            cursor = response_metadata.get("next_cursor")
+            if not cursor:
+                break
+                
+        except Exception as e:
+            print(f"Error fetching messages: {e}")
+            raise
+    
+    print(f"Fetched {len(all_messages)} messages from channel {channel_name}")
+    return all_messages
+
+
+def add_reaction_to_message(
+    channel_id: str,
+    message_timestamp: str,
+    emoji: str
+) -> bool:
+    """
+    Add an emoji reaction to a Slack message.
+    
+    Args:
+        channel_id: Slack channel ID
+        message_timestamp: Message timestamp (ts field from message)
+        emoji: Emoji name (e.g., "computer" or "💻")
+    
+    Returns:
+        True if successful, False otherwise
+    """
+    try:
+        from slack_sdk import WebClient
+    except ImportError:
+        raise ImportError("slack-sdk is required. Install it with: pip install slack-sdk")
+    
+    bot_token = get_slack_bot_token()
+    if not bot_token:
+        raise ValueError("SLACK_BOT_TOKEN or SLACK_BOT_TOKEN_NAME must be configured")
+    
+    client = WebClient(token=bot_token)
+    
+    # Remove colons if present (e.g., :computer: -> computer)
+    emoji_clean = emoji.strip(':')
+    
+    try:
+        response = client.reactions_add(
+            channel=channel_id,
+            timestamp=message_timestamp,
+            name=emoji_clean
+        )
+        return response.get("ok", False)
+    except Exception as e:
+        print(f"Error adding reaction {emoji} to message: {e}")
+        return False
+
+
+def get_channel_id(channel_name: str) -> Optional[str]:
+    """
+    Get Slack channel ID from channel name.
+    
+    Args:
+        channel_name: Name of the channel (with or without #)
+    
+    Returns:
+        Channel ID or None if not found
+    """
+    try:
+        from slack_sdk import WebClient
+    except ImportError:
+        raise ImportError("slack-sdk is required. Install it with: pip install slack-sdk")
+    
+    bot_token = get_slack_bot_token()
+    if not bot_token:
+        raise ValueError("SLACK_BOT_TOKEN or SLACK_BOT_TOKEN_NAME must be configured")
+    
+    client = WebClient(token=bot_token)
+    
+    # Clean channel name (remove # if present)
+    channel_clean = channel_name.lstrip('#')
+    
+    try:
+        channels_response = client.conversations_list(types="public_channel,private_channel")
+        for channel in channels_response["channels"]:
+            if channel["name"] == channel_clean:
+                return channel["id"]
+        return None
+    except Exception as e:
+        print(f"Error finding channel '{channel_name}': {e}")
+        return None
 
