@@ -25,7 +25,10 @@ fi
 # Load .env file if it exists
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [ -f "$SCRIPT_DIR/.env" ]; then
-    export $(grep -v '^#' "$SCRIPT_DIR/.env" | xargs)
+    # Source the .env file to export variables
+    set -a
+    source "$SCRIPT_DIR/.env"
+    set +a
 fi
 
 # Set environment variables
