@@ -348,43 +348,43 @@ def format_rt_alert_message(
     else:
         # Count-based alert (original format)
         blocks = [
-            {
-                "type": "header",
-                "text": {
-                    "type": "plain_text",
-                    "text": f"🚨 Alert: {meaningful_name}"
-                }
-            },
-            {
-                "type": "section",
-                "fields": [
-                    {
-                        "type": "mrkdwn",
-                        "text": f"*Meaningful Name:*\n{meaningful_name}"
-                    },
-                    {
-                        "type": "mrkdwn",
-                        "text": f"*Current Count:*\n{event_count}"
-                    },
-                    {
-                        "type": "mrkdwn",
-                        "text": f"*Start Time Window:*\n{start_time_str}"
-                    },
-                    {
-                        "type": "mrkdwn",
-                        "text": f"*End Time Window:*\n{end_time_str}"
-                    },
-                    {
-                        "type": "mrkdwn",
-                        "text": f"*Event Name:*\n`{event_name}`"
-                    },
-                    {
-                        "type": "mrkdwn",
-                        "text": f"*Threshold:*\n{threshold}"
-                    }
-                ]
+        {
+            "type": "header",
+            "text": {
+                "type": "plain_text",
+                "text": f"🚨 Alert: {meaningful_name}"
             }
-        ]
+        },
+        {
+            "type": "section",
+            "fields": [
+                {
+                    "type": "mrkdwn",
+                    "text": f"*Meaningful Name:*\n{meaningful_name}"
+                },
+                {
+                    "type": "mrkdwn",
+                    "text": f"*Current Count:*\n{event_count}"
+                },
+                {
+                    "type": "mrkdwn",
+                    "text": f"*Start Time Window:*\n{start_time_str}"
+                },
+                {
+                    "type": "mrkdwn",
+                    "text": f"*End Time Window:*\n{end_time_str}"
+                },
+                {
+                    "type": "mrkdwn",
+                    "text": f"*Event Name:*\n`{event_name}`"
+                },
+                {
+                    "type": "mrkdwn",
+                    "text": f"*Threshold:*\n{threshold}"
+                }
+            ]
+        }
+    ]
     
     message = {
         "blocks": blocks
