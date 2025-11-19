@@ -552,12 +552,16 @@ def get_channel_id(channel_name: str) -> Optional[str]:
     channel_clean = channel_name.lstrip('#')
     
     try:
-        channels_response = client.conversations_list(types="public_channel,private_channel")
-        for channel in channels_response["channels"]:
-            if channel["name"] == channel_clean:
-                return channel["id"]
+        channels_response = client.conversations_list(types="public_channel,private_channel", limit=1000)
+        if not channels_response.get("ok"):
+            error = channels_response.get("error")
+            raise Exception(f"Slack API error: {error}")
+        
+        for channel in channels_response.get("channels", []):
+            if channel.get("name") == channel_clean:
+                return channel.get("id")
         return None
     except Exception as e:
         print(f"Error finding channel '{channel_name}': {e}")
-        return None
+        raise
 

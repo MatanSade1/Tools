@@ -198,9 +198,12 @@ def process_gdpr_requests(
     print(f"Date range: {start_date} to {end_date}")
     
     # Get channel ID
-    channel_id = get_channel_id(channel_name)
-    if not channel_id:
-        raise ValueError(f"Channel '{channel_name}' not found")
+    try:
+        channel_id = get_channel_id(channel_name)
+        if not channel_id:
+            raise ValueError(f"Channel '{channel_name}' not found. Make sure the bot is invited to the channel.")
+    except Exception as e:
+        raise ValueError(f"Error accessing channel '{channel_name}': {e}")
     
     # Fetch messages
     print(f"Fetching messages from Slack...")
