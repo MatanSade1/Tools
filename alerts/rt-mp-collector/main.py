@@ -115,8 +115,9 @@ def rt_mp_collector(request):
             
             try:
                 # Try to query BigQuery first, fall back to collected events for local testing
-                hour_end = datetime.utcnow()
-                hour_start = hour_end - timedelta(hours=1)
+                # Use the same time window as collection frequency (15 minutes)
+                window_end = datetime.utcnow()
+                window_start = window_end - timedelta(minutes=collection_frequency)
                 
                 should_alert = False
                 alert_value = None
@@ -129,16 +130,17 @@ def rt_mp_collector(request):
                         # Percentage-based: (error users / total active users) > threshold
                         error_users = query_distinct_users_by_hour(
                             event_name=event_name,
-                            start_time=hour_start,
-                            end_time=hour_end
+                            start_time=window_start,
+                            end_time=window_end
                         )
                         total_active_users = query_total_active_users_by_hour(
-                            start_time=hour_start,
-                            end_time=hour_end
+                            start_time=window_start,
+                            end_time=window_end
                         )
                         
-                        print(f"Error users for {event_name} in last hour: {error_users}")
-                        print(f"Total active users in last hour: {total_active_users}")
+                        window_minutes = int((window_end - window_start).total_seconds() / 60)
+                        print(f"Error users for {event_name} in last {window_minutes} minutes: {error_users}")
+                        print(f"Total active users in last {window_minutes} minutes: {total_active_users}")
                         
                         if total_active_users > 0:
                             percentage = error_users / total_active_users
@@ -152,10 +154,11 @@ def rt_mp_collector(request):
                         # Count-based: event_count > threshold
                         event_count = query_events_by_hour(
                             event_name=event_name,
-                            start_time=hour_start,
-                            end_time=hour_end
+                            start_time=window_start,
+                            end_time=window_end
                         )
-                        print(f"Event count for {event_name} in last hour (from BigQuery): {event_count}")
+                        window_minutes = int((window_end - window_start).total_seconds() / 60)
+                        print(f"Event count for {event_name} in last {window_minutes} minutes (from BigQuery): {event_count}")
                         alert_value = event_count
                         should_alert = event_count > threshold
                         
@@ -192,7 +195,7 @@ def rt_mp_collector(request):
                         should_alert = event_count > threshold
                 
                 # Check if we've recently alerted for this event (2-hour cooldown)
-                cache_key = f"{event_name}_{hour_end.strftime('%Y-%m-%d-%H')}"
+                cache_key = f"{event_name}_{window_end.strftime('%Y-%m-%d-%H-%M')}"
                 last_alert = _last_alert_cache.get(cache_key)
                 
                 if last_alert:
@@ -214,8 +217,8 @@ def rt_mp_collector(request):
                             event_count=alert_value if threshold_type == "count" else error_users,
                             threshold=threshold,
                             channel=channel,
-                            start_time=hour_start,
-                            end_time=hour_end,
+                            start_time=window_start,
+                            end_time=window_end,
                             threshold_type=threshold_type,
                             total_active_users=total_active_users,
                             percentage=alert_value if threshold_type == "percentage" else None
