@@ -192,11 +192,14 @@ def send_rt_alert(
     meaningful_name: str,
     event_name: str,
     event_count: int,
-    threshold: int,
+    threshold: float,
     channel: Optional[str] = None,
     webhook_url: Optional[str] = None,
     start_time: Optional[datetime] = None,
-    end_time: Optional[datetime] = None
+    end_time: Optional[datetime] = None,
+    threshold_type: str = "count",
+    total_active_users: Optional[int] = None,
+    percentage: Optional[float] = None
 ):
     """
     Send RT alert to Slack channel with custom format.
@@ -204,12 +207,15 @@ def send_rt_alert(
     Args:
         meaningful_name: Human-readable name for the alert
         event_name: Name of the event that triggered the alert
-        event_count: Current count of events
-        threshold: Threshold that was exceeded
+        event_count: Current count of events (or error users for percentage type)
+        threshold: Threshold that was exceeded (count or percentage as float)
         channel: Slack channel to send to (required if webhook_url not provided)
         webhook_url: Custom webhook URL (optional, overrides channel-based lookup)
         start_time: Start time of the aggregation window (optional)
         end_time: End time of the aggregation window (optional)
+        threshold_type: Type of threshold - "count" or "percentage" (default: "count")
+        total_active_users: Total active users (required for percentage type)
+        percentage: Calculated percentage (required for percentage type)
     """
     # Use provided webhook_url or get channel-specific webhook
     if webhook_url:
@@ -227,7 +233,10 @@ def send_rt_alert(
         event_count=event_count,
         threshold=threshold,
         start_time=start_time,
-        end_time=end_time
+        end_time=end_time,
+        threshold_type=threshold_type,
+        total_active_users=total_active_users,
+        percentage=percentage
     )
     
     # Send to Slack
@@ -248,22 +257,28 @@ def format_rt_alert_message(
     meaningful_name: str,
     event_name: str,
     event_count: int,
-    threshold: int,
+    threshold: float,
     start_time: Optional[datetime] = None,
-    end_time: Optional[datetime] = None
+    end_time: Optional[datetime] = None,
+    threshold_type: str = "count",
+    total_active_users: Optional[int] = None,
+    percentage: Optional[float] = None
 ) -> Dict:
     """
     Format RT alert data as Slack message.
     
-    Format includes: meaningful name, current count, start/end time windows, event_name, threshold
+    Format includes: meaningful name, current count/percentage, start/end time windows, event_name, threshold
     
     Args:
         meaningful_name: Human-readable name for the alert
         event_name: Name of the event
-        event_count: Current count of events
-        threshold: Threshold that was exceeded
+        event_count: Current count of events (or error users for percentage type)
+        threshold: Threshold that was exceeded (count or percentage as float)
         start_time: Start time of the aggregation window (optional)
         end_time: End time of the aggregation window (optional)
+        threshold_type: Type of threshold - "count" or "percentage" (default: "count")
+        total_active_users: Total active users (for percentage type)
+        percentage: Calculated percentage (for percentage type)
     
     Returns:
         Formatted Slack message dict
@@ -280,44 +295,96 @@ def format_rt_alert_message(
         end_time_str = "N/A"
     
     # Build blocks with required format
-    blocks = [
-        {
-            "type": "header",
-            "text": {
-                "type": "plain_text",
-                "text": f"🚨 Alert: {meaningful_name}"
-            }
-        },
-        {
-            "type": "section",
-            "fields": [
-                {
-                    "type": "mrkdwn",
-                    "text": f"*Meaningful Name:*\n{meaningful_name}"
-                },
-                {
-                    "type": "mrkdwn",
-                    "text": f"*Current Count:*\n{event_count}"
-                },
-                {
-                    "type": "mrkdwn",
-                    "text": f"*Start Time Window:*\n{start_time_str}"
-                },
-                {
-                    "type": "mrkdwn",
-                    "text": f"*End Time Window:*\n{end_time_str}"
-                },
-                {
-                    "type": "mrkdwn",
-                    "text": f"*Event Name:*\n`{event_name}`"
-                },
-                {
-                    "type": "mrkdwn",
-                    "text": f"*Threshold:*\n{threshold}"
+    if threshold_type == "percentage" and percentage is not None and total_active_users is not None:
+        # Percentage-based alert
+        percentage_display = f"{percentage*100:.4f}%"
+        threshold_display = f"{threshold*100:.4f}%"
+        blocks = [
+            {
+                "type": "header",
+                "text": {
+                    "type": "plain_text",
+                    "text": f"🚨 Alert: {meaningful_name}"
                 }
-            ]
-        }
-    ]
+            },
+            {
+                "type": "section",
+                "fields": [
+                    {
+                        "type": "mrkdwn",
+                        "text": f"*Meaningful Name:*\n{meaningful_name}"
+                    },
+                    {
+                        "type": "mrkdwn",
+                        "text": f"*Percentage:*\n{percentage_display}"
+                    },
+                    {
+                        "type": "mrkdwn",
+                        "text": f"*Error Users:*\n{event_count}"
+                    },
+                    {
+                        "type": "mrkdwn",
+                        "text": f"*Total Active Users:*\n{total_active_users}"
+                    },
+                    {
+                        "type": "mrkdwn",
+                        "text": f"*Start Time Window:*\n{start_time_str}"
+                    },
+                    {
+                        "type": "mrkdwn",
+                        "text": f"*End Time Window:*\n{end_time_str}"
+                    },
+                    {
+                        "type": "mrkdwn",
+                        "text": f"*Event Name:*\n`{event_name}`"
+                    },
+                    {
+                        "type": "mrkdwn",
+                        "text": f"*Threshold:*\n{threshold_display}"
+                    }
+                ]
+            }
+        ]
+    else:
+        # Count-based alert (original format)
+        blocks = [
+            {
+                "type": "header",
+                "text": {
+                    "type": "plain_text",
+                    "text": f"🚨 Alert: {meaningful_name}"
+                }
+            },
+            {
+                "type": "section",
+                "fields": [
+                    {
+                        "type": "mrkdwn",
+                        "text": f"*Meaningful Name:*\n{meaningful_name}"
+                    },
+                    {
+                        "type": "mrkdwn",
+                        "text": f"*Current Count:*\n{event_count}"
+                    },
+                    {
+                        "type": "mrkdwn",
+                        "text": f"*Start Time Window:*\n{start_time_str}"
+                    },
+                    {
+                        "type": "mrkdwn",
+                        "text": f"*End Time Window:*\n{end_time_str}"
+                    },
+                    {
+                        "type": "mrkdwn",
+                        "text": f"*Event Name:*\n`{event_name}`"
+                    },
+                    {
+                        "type": "mrkdwn",
+                        "text": f"*Threshold:*\n{threshold}"
+                    }
+                ]
+            }
+        ]
     
     message = {
         "blocks": blocks

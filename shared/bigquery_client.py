@@ -292,6 +292,98 @@ def query_events_by_hour(
     return 0
 
 
+def query_distinct_users_by_hour(
+    event_name: str,
+    start_time: datetime,
+    end_time: datetime
+) -> int:
+    """
+    Query distinct users who had a specific event in the time window.
+    
+    Args:
+        event_name: Name of the event to query
+        start_time: Start of time window
+        end_time: End of time window
+    
+    Returns:
+        Count of distinct users who had the event
+    """
+    client = get_bigquery_client()
+    config = get_config()
+    dataset_id = config.get("rt_mp_dataset", config["bigquery_dataset"])
+    table_id = config.get("rt_mp_table", "rt_mp_events")
+    
+    query = f"""
+    SELECT COUNT(DISTINCT distinct_id) as distinct_user_count
+    FROM `{config["gcp_project_id"]}.{dataset_id}.{table_id}`
+    WHERE event_name = @event_name
+        AND event_timestamp >= @start_time
+        AND event_timestamp < @end_time
+        AND distinct_id IS NOT NULL
+    """
+    
+    job_config = bigquery.QueryJobConfig(
+        query_parameters=[
+            bigquery.ScalarQueryParameter("event_name", "STRING", event_name),
+            bigquery.ScalarQueryParameter("start_time", "TIMESTAMP", start_time),
+            bigquery.ScalarQueryParameter("end_time", "TIMESTAMP", end_time),
+        ]
+    )
+    
+    query_job = client.query(query, job_config=job_config)
+    results = query_job.result()
+    
+    # Get the count from the first (and only) row
+    for row in results:
+        return row.distinct_user_count
+    
+    return 0
+
+
+def query_total_active_users_by_hour(
+    start_time: datetime,
+    end_time: datetime
+) -> int:
+    """
+    Query distinct users who had ANY event in the time window (total active users).
+    
+    Args:
+        start_time: Start of time window
+        end_time: End of time window
+    
+    Returns:
+        Count of distinct users who had any event
+    """
+    client = get_bigquery_client()
+    config = get_config()
+    dataset_id = config.get("rt_mp_dataset", config["bigquery_dataset"])
+    table_id = config.get("rt_mp_table", "rt_mp_events")
+    
+    query = f"""
+    SELECT COUNT(DISTINCT distinct_id) as distinct_user_count
+    FROM `{config["gcp_project_id"]}.{dataset_id}.{table_id}`
+    WHERE event_timestamp >= @start_time
+        AND event_timestamp < @end_time
+        AND distinct_id IS NOT NULL
+    """
+    
+    job_config = bigquery.QueryJobConfig(
+        query_parameters=[
+            bigquery.ScalarQueryParameter("start_time", "TIMESTAMP", start_time),
+            bigquery.ScalarQueryParameter("end_time", "TIMESTAMP", end_time),
+        ]
+    )
+    
+    query_job = client.query(query, job_config=job_config)
+    results = query_job.result()
+    
+    # Get the count from the first (and only) row
+    for row in results:
+        return row.distinct_user_count
+    
+    return 0
+
+
 def ensure_gdpr_table_exists():
     """Create GDPR deletion requests BigQuery table if it doesn't exist."""
     client = get_bigquery_client()

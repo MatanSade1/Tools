@@ -3,7 +3,8 @@
     {
       "name": "impression_error_null_pointer_detected",
       "enabled": true,
-      "alert_threshold": 5,
+      "threshold_type": "percentage",
+      "alert_threshold": 0.005,
       "alert_channel": "#data-alerts-critical",
       "meaningful_name": "Null Pointer Error Detected"
     }

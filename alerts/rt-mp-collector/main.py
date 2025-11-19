@@ -6,7 +6,7 @@ import base64
 from datetime import datetime, timedelta
 from typing import List, Dict
 from shared.config import get_config, get_rt_mp_config
-from shared.bigquery_client import insert_events_to_rt_table, query_events_by_hour
+from shared.bigquery_client import insert_events_to_rt_table, query_events_by_hour, query_distinct_users_by_hour, query_total_active_users_by_hour
 from shared.slack_client import send_rt_alert
 
 
@@ -106,72 +106,139 @@ def rt_mp_collector(request):
         
         for event_config in enabled_events:
             event_name = event_config["name"]
+            threshold_type = event_config.get("threshold_type", "count")  # "count" or "percentage"
             threshold = event_config.get("alert_threshold", 10)
             channel = event_config.get("alert_channel", "#data-alerts-sandbox")
             meaningful_name = event_config.get("meaningful_name", event_name)
             
-            print(f"Checking threshold for {event_name} (threshold: {threshold})")
+            print(f"Checking threshold for {event_name} (type: {threshold_type}, threshold: {threshold})")
             
             try:
-                # Try to query BigQuery first, fall back to collected events count for local testing
+                # Try to query BigQuery first, fall back to collected events for local testing
                 hour_end = datetime.utcnow()
                 hour_start = hour_end - timedelta(hours=1)
                 
+                should_alert = False
+                alert_value = None
+                threshold_value = threshold
+                total_active_users = None
+                error_users = None
+                
                 try:
-                    event_count = query_events_by_hour(
-                        event_name=event_name,
-                        start_time=hour_start,
-                        end_time=hour_end
-                    )
-                    print(f"Event count for {event_name} in last hour (from BigQuery): {event_count}")
-                except Exception as bq_error:
-                    # BigQuery not available (local testing) - use collected events count
-                    event_count = events_by_name.get(event_name, 0)
-                    print(f"⚠️  BigQuery not available, using collected events count: {event_count}")
-                    print(f"   (This is for local testing only. In production, BigQuery will be used.)")
-                
-                print(f"Event count for {event_name} in last hour: {event_count}")
-                
-                # Check if threshold is exceeded
-                if event_count > threshold:
-                    # Check if we've recently alerted for this event (2-hour cooldown)
-                    cache_key = f"{event_name}_{hour_end.strftime('%Y-%m-%d-%H')}"
-                    last_alert = _last_alert_cache.get(cache_key)
-                    
-                    should_alert = True
-                    if last_alert:
-                        time_since_alert = (datetime.utcnow() - last_alert).total_seconds()
-                        if time_since_alert < 7200:  # 2 hours cooldown
-                            should_alert = False
-                            print(f"Skipping alert for {event_name} (alerted {int(time_since_alert/60)} minutes ago)")
-                    
-                    if should_alert:
-                        print(f"🚨 Alert triggered for {event_name}: {event_count} events (threshold: {threshold})")
+                    if threshold_type == "percentage":
+                        # Percentage-based: (error users / total active users) > threshold
+                        error_users = query_distinct_users_by_hour(
+                            event_name=event_name,
+                            start_time=hour_start,
+                            end_time=hour_end
+                        )
+                        total_active_users = query_total_active_users_by_hour(
+                            start_time=hour_start,
+                            end_time=hour_end
+                        )
                         
-                        try:
-                            send_rt_alert(
-                                meaningful_name=meaningful_name,
-                                event_name=event_name,
-                                event_count=event_count,
-                                threshold=threshold,
-                                channel=channel,
-                                start_time=hour_start,
-                                end_time=hour_end
-                            )
-                            
-                            # Update alert cache
-                            _last_alert_cache[cache_key] = datetime.utcnow()
-                            alerts_sent += 1
-                            
-                        except Exception as e:
-                            print(f"Error sending alert for {event_name}: {e}")
-                            # Continue with other events
-                            continue
+                        print(f"Error users for {event_name} in last hour: {error_users}")
+                        print(f"Total active users in last hour: {total_active_users}")
+                        
+                        if total_active_users > 0:
+                            percentage = error_users / total_active_users
+                            alert_value = percentage
+                            print(f"Percentage: {percentage:.6f} ({percentage*100:.4f}%)")
+                            should_alert = percentage > threshold
+                        else:
+                            print(f"⚠️  No active users found, skipping percentage check")
+                            should_alert = False
+                    else:
+                        # Count-based: event_count > threshold
+                        event_count = query_events_by_hour(
+                            event_name=event_name,
+                            start_time=hour_start,
+                            end_time=hour_end
+                        )
+                        print(f"Event count for {event_name} in last hour (from BigQuery): {event_count}")
+                        alert_value = event_count
+                        should_alert = event_count > threshold
+                        
+                except Exception as bq_error:
+                    # BigQuery not available (local testing) - use collected events
+                    print(f"⚠️  BigQuery not available, using collected events (local testing only)")
+                    
+                    if threshold_type == "percentage":
+                        # Calculate from collected events
+                        error_user_set = set()
+                        total_user_set = set()
+                        
+                        for event in all_events:
+                            distinct_id = event.get("distinct_id")
+                            if distinct_id:
+                                total_user_set.add(distinct_id)
+                                if event.get("event_name") == event_name:
+                                    error_user_set.add(distinct_id)
+                        
+                        error_users = len(error_user_set)
+                        total_active_users = len(total_user_set)
+                        
+                        if total_active_users > 0:
+                            percentage = error_users / total_active_users
+                            alert_value = percentage
+                            print(f"Percentage (from collected events): {percentage:.6f} ({percentage*100:.4f}%)")
+                            should_alert = percentage > threshold
+                        else:
+                            should_alert = False
+                    else:
+                        event_count = events_by_name.get(event_name, 0)
+                        alert_value = event_count
+                        print(f"Event count (from collected events): {event_count}")
+                        should_alert = event_count > threshold
+                
+                # Check if we've recently alerted for this event (2-hour cooldown)
+                cache_key = f"{event_name}_{hour_end.strftime('%Y-%m-%d-%H')}"
+                last_alert = _last_alert_cache.get(cache_key)
+                
+                if last_alert:
+                    time_since_alert = (datetime.utcnow() - last_alert).total_seconds()
+                    if time_since_alert < 7200:  # 2 hours cooldown
+                        should_alert = False
+                        print(f"Skipping alert for {event_name} (alerted {int(time_since_alert/60)} minutes ago)")
+                
+                if should_alert:
+                    if threshold_type == "percentage":
+                        print(f"🚨 Alert triggered for {event_name}: {alert_value*100:.4f}% ({error_users}/{total_active_users} users) exceeds threshold {threshold*100:.4f}%")
+                    else:
+                        print(f"🚨 Alert triggered for {event_name}: {alert_value} events (threshold: {threshold})")
+                    
+                    try:
+                        send_rt_alert(
+                            meaningful_name=meaningful_name,
+                            event_name=event_name,
+                            event_count=alert_value if threshold_type == "count" else error_users,
+                            threshold=threshold,
+                            channel=channel,
+                            start_time=hour_start,
+                            end_time=hour_end,
+                            threshold_type=threshold_type,
+                            total_active_users=total_active_users,
+                            percentage=alert_value if threshold_type == "percentage" else None
+                        )
+                        
+                        # Update alert cache
+                        _last_alert_cache[cache_key] = datetime.utcnow()
+                        alerts_sent += 1
+                        
+                    except Exception as e:
+                        print(f"Error sending alert for {event_name}: {e}")
+                        # Continue with other events
+                        continue
                 else:
-                    print(f"No alert needed for {event_name} ({event_count} <= {threshold})")
+                    if threshold_type == "percentage":
+                        print(f"No alert needed for {event_name} ({alert_value*100:.4f}% <= {threshold*100:.4f}%)")
+                    else:
+                        print(f"No alert needed for {event_name} ({alert_value} <= {threshold})")
                     
             except Exception as e:
                 print(f"Error checking threshold for {event_name}: {e}")
+                import traceback
+                traceback.print_exc()
                 # Continue with other events
                 continue
         
