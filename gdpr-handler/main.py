@@ -87,10 +87,11 @@ def extract_ticket_id(message_text: str) -> Optional[str]:
     # - "#12345" (if it's a ticket number)
     
     patterns = [
-        r'(?:ticket[_\s]?id|ticket)[:\s=]+([a-zA-Z0-9_-]+)',
-        r'ticket[:\s=]+([a-zA-Z0-9_-]+)',
+        r'ticket\s+number\s+(\d+)',  # "Ticket number 3880"
+        r'ticket\s+(\d+)',  # "Ticket 3880"
+        r'(?:ticket[_\s]?id|ticket)[:\s=]+(\d+)',  # "ticket: 3880" or "ticket_id: 3880"
         r'#(\d+)',  # Hash followed by digits
-        r'ticket[#\s]+([a-zA-Z0-9_-]+)',
+        r'ticket[:\s=]+([a-zA-Z0-9_-]+)',  # Fallback for non-numeric tickets
     ]
     
     for pattern in patterns:
