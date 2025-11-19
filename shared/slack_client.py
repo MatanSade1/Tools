@@ -434,17 +434,40 @@ def read_slack_channel_messages(
     # Clean channel name (remove # if present)
     channel_clean = channel_name.lstrip('#')
     
-    # Get channel ID
+    # Get channel ID (with pagination support)
     try:
-        channels_response = client.conversations_list(types="public_channel,private_channel")
         channel_id = None
-        for channel in channels_response["channels"]:
-            if channel["name"] == channel_clean:
-                channel_id = channel["id"]
+        cursor = None
+        
+        while True:
+            params = {
+                "types": "public_channel,private_channel",
+                "limit": 1000
+            }
+            if cursor:
+                params["cursor"] = cursor
+            
+            channels_response = client.conversations_list(**params)
+            
+            if not channels_response.get("ok"):
+                error = channels_response.get("error")
+                raise Exception(f"Slack API error: {error}")
+            
+            for channel in channels_response.get("channels", []):
+                if channel.get("name") == channel_clean:
+                    channel_id = channel.get("id")
+                    break
+            
+            if channel_id:
+                break
+            
+            # Check for more pages
+            cursor = channels_response.get("response_metadata", {}).get("next_cursor")
+            if not cursor:
                 break
         
         if not channel_id:
-            raise ValueError(f"Channel '{channel_name}' not found")
+            raise ValueError(f"Channel '{channel_name}' not found. Make sure the bot is invited to the channel.")
     except Exception as e:
         raise ValueError(f"Error finding channel '{channel_name}': {e}")
     
