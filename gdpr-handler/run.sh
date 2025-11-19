@@ -1,7 +1,26 @@
 #!/bin/bash
 # Quick run script (assumes setup is already done)
+#
+# Usage:
+#   ./gdpr-handler/run.sh                    # Last 7 days (default)
+#   ./gdpr-handler/run.sh 2025-11-17 2025-12-31  # Custom date range
+#   ./gdpr-handler/run.sh --help             # Show help
 
 set -e
+
+# Show help if requested
+if [ "$1" == "--help" ] || [ "$1" == "-h" ]; then
+    echo "GDPR Handler - Quick Run Script"
+    echo ""
+    echo "Usage:"
+    echo "  ./gdpr-handler/run.sh                                    # Last 7 days (default)"
+    echo "  ./gdpr-handler/run.sh <start-date> <end-date>            # Custom date range"
+    echo "  ./gdpr-handler/run.sh 2025-11-17 2025-12-31             # Example"
+    echo ""
+    echo "Date format: YYYY-MM-DD (e.g., 2025-11-17)"
+    echo ""
+    exit 0
+fi
 
 # Load .env file if it exists
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -21,8 +40,9 @@ fi
 export GCP_PROJECT_ID="${GCP_PROJECT_ID:-yotam-395120}"
 export PYTHONPATH=/Users/matansade/Tools:$PYTHONPATH
 
-# Default to last 7 days if no arguments provided
+# Handle date arguments
 if [ $# -eq 0 ]; then
+    # No arguments: use last 7 days
     if [[ "$OSTYPE" == "darwin"* ]]; then
         START_DATE=$(date -v-7d +%Y-%m-%d)
         END_DATE=$(date +%Y-%m-%d)
@@ -32,9 +52,29 @@ if [ $# -eq 0 ]; then
     fi
     echo "Using default date range: $START_DATE to $END_DATE"
     echo ""
-else
+elif [ $# -eq 2 ]; then
+    # Two arguments: start date and end date
     START_DATE=$1
     END_DATE=$2
+    
+    # Validate date format (basic check)
+    if [[ ! "$START_DATE" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || [[ ! "$END_DATE" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+        echo "❌ ERROR: Invalid date format"
+        echo "Dates must be in YYYY-MM-DD format (e.g., 2025-11-17)"
+        exit 1
+    fi
+    
+    echo "Using custom date range: $START_DATE to $END_DATE"
+    echo ""
+else
+    echo "❌ ERROR: Invalid number of arguments"
+    echo ""
+    echo "Usage:"
+    echo "  ./gdpr-handler/run.sh                                    # Last 7 days"
+    echo "  ./gdpr-handler/run.sh <start-date> <end-date>            # Custom range"
+    echo "  ./gdpr-handler/run.sh 2025-11-17 2025-12-31             # Example"
+    echo ""
+    exit 1
 fi
 
 # Run the handler

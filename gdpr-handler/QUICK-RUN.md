@@ -17,14 +17,29 @@ This will:
 ## Quick Run (After Setup)
 
 For quick runs, use the simple script:
+
+**Default (last 7 days):**
 ```bash
 cd /Users/matansade/Tools
 ./gdpr-handler/run.sh
 ```
 
-This processes the last 7 days by default.
+**Custom date range:**
+```bash
+cd /Users/matansade/Tools
+./gdpr-handler/run.sh 2025-11-17 2025-12-31
+```
 
-Or specify custom dates:
+**Show help:**
+```bash
+./gdpr-handler/run.sh --help
+```
+
+The script accepts two arguments:
+- First argument: Start date (YYYY-MM-DD)
+- Second argument: End date (YYYY-MM-DD)
+
+Example: Process messages from November 17 to December 31, 2025:
 ```bash
 ./gdpr-handler/run.sh 2025-11-17 2025-12-31
 ```
