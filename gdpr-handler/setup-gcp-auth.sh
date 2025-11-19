@@ -6,6 +6,11 @@ echo "GCP Authentication Setup for BigQuery"
 echo "=========================================="
 echo ""
 
+# Add gcloud to PATH if it exists
+if [ -d "/Users/matansade/google-cloud-sdk/bin" ]; then
+    export PATH="/Users/matansade/google-cloud-sdk/bin:$PATH"
+fi
+
 # Check if gcloud is installed
 if ! command -v gcloud &> /dev/null; then
     echo "❌ gcloud CLI not found"

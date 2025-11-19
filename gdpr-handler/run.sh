@@ -43,6 +43,11 @@ fi
 export GCP_PROJECT_ID="${GCP_PROJECT_ID:-yotam-395120}"
 export PYTHONPATH=/Users/matansade/Tools:$PYTHONPATH
 
+# Add gcloud to PATH if it exists
+if [ -d "/Users/matansade/google-cloud-sdk/bin" ]; then
+    export PATH="/Users/matansade/google-cloud-sdk/bin:$PATH"
+fi
+
 # Handle date arguments
 if [ $# -eq 0 ]; then
     # No arguments: use last 7 days
