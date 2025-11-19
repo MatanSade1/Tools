@@ -56,9 +56,10 @@ def extract_distinct_id(message_text: str) -> Optional[str]:
     # - Just a number/string that looks like an ID
     
     patterns = [
-        r'(?:user[_\s]?id|distinct[_\s]?id|id)[:\s]+([a-zA-Z0-9_-]+)',
-        r'(?:user[_\s]?id|distinct[_\s]?id|id)[:\s]+([a-zA-Z0-9_-]+)',
-        r'\b([a-zA-Z0-9]{8,})\b',  # Alphanumeric string of 8+ chars
+        r'(?:user[_\s]?id|distinct[_\s]?id|id)[:\s=]+([a-zA-Z0-9_-]+)',
+        r'(?:user[_\s]?id|distinct[_\s]?id)[:\s=]+([a-zA-Z0-9_-]+)',
+        r'\bdistinct[_\s]?id[:\s=]+([a-zA-Z0-9_-]+)',
+        r'\b([a-zA-Z0-9]{8,})\b',  # Alphanumeric string of 8+ chars (fallback)
     ]
     
     for pattern in patterns:
@@ -86,9 +87,10 @@ def extract_ticket_id(message_text: str) -> Optional[str]:
     # - "#12345" (if it's a ticket number)
     
     patterns = [
-        r'(?:ticket[_\s]?id|ticket)[:\s]+([a-zA-Z0-9_-]+)',
+        r'(?:ticket[_\s]?id|ticket)[:\s=]+([a-zA-Z0-9_-]+)',
+        r'ticket[:\s=]+([a-zA-Z0-9_-]+)',
         r'#(\d+)',  # Hash followed by digits
-        r'ticket[:\s]+([a-zA-Z0-9_-]+)',
+        r'ticket[#\s]+([a-zA-Z0-9_-]+)',
     ]
     
     for pattern in patterns:
