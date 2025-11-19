@@ -1,11 +1,11 @@
 {
   "events": [
     {
-      "name": "merge",
+      "name": "impression_splash_screen",
       "enabled": true,
       "alert_threshold": 5,
       "alert_channel": "#data-alerts-sandbox",
-      "meaningful_name": "Merge Events"
+      "meaningful_name": "Splash Screen Impressions"
     }
   ],
   "collection_frequency_minutes": 15
