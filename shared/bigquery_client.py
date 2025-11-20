@@ -404,11 +404,29 @@ def ensure_gdpr_table_exists():
         dataset = client.create_dataset(dataset, exists_ok=True)
         print(f"Created dataset {project_id}.{dataset_id}")
     
-    # Create table if it doesn't exist
+    # Create table if it doesn't exist, or add missing columns if it does
     table_ref = dataset_ref.table(table_id)
     try:
-        client.get_table(table_ref)
+        existing_table = client.get_table(table_ref)
         print(f"Table {project_id}.{dataset_id}.{table_id} already exists")
+        
+        # Check if new columns need to be added
+        existing_fields = {field.name for field in existing_table.schema}
+        required_fields = {"install_date", "last_activity_date"}
+        missing_fields = required_fields - existing_fields
+        
+        if missing_fields:
+            print(f"Adding missing columns: {missing_fields}")
+            new_schema = list(existing_table.schema)
+            
+            if "install_date" not in existing_fields:
+                new_schema.append(bigquery.SchemaField("install_date", "DATE", mode="NULLABLE"))
+            if "last_activity_date" not in existing_fields:
+                new_schema.append(bigquery.SchemaField("last_activity_date", "DATE", mode="NULLABLE"))
+            
+            existing_table.schema = new_schema
+            client.update_table(existing_table, ["schema"])
+            print(f"✅ Added columns: {missing_fields}")
     except NotFound:
         schema = [
             bigquery.SchemaField("distinct_id", "STRING", mode="NULLABLE"),
@@ -422,11 +440,53 @@ def ensure_gdpr_table_exists():
             bigquery.SchemaField("game_state_status", "STRING", mode="NULLABLE"),
             bigquery.SchemaField("is_request_completed", "BOOLEAN", mode="NULLABLE"),
             bigquery.SchemaField("slack_message_ts", "STRING", mode="NULLABLE"),
+            bigquery.SchemaField("install_date", "DATE", mode="NULLABLE"),
+            bigquery.SchemaField("last_activity_date", "DATE", mode="NULLABLE"),
             bigquery.SchemaField("inserted_at", "TIMESTAMP", mode="REQUIRED"),
         ]
         table = bigquery.Table(table_ref, schema=schema)
         table = client.create_table(table)
         print(f"Created table {project_id}.{dataset_id}.{table_id}")
+
+
+def get_player_dates(distinct_ids: List[str]) -> Dict[str, Dict]:
+    """
+    Get install_date and last_activity_date from dim_player table.
+    
+    Args:
+        distinct_ids: List of distinct_id values to query
+    
+    Returns:
+        Dictionary mapping distinct_id to {install_date, last_activity_date}
+    """
+    if not distinct_ids:
+        return {}
+    
+    client = get_bigquery_client()
+    
+    # Build query with IN clause
+    placeholders = ", ".join([f"'{did}'" for did in distinct_ids])
+    query = f"""
+    SELECT 
+        distinct_id,
+        install_date,
+        DATE(last_event_time) as last_activity_date
+    FROM `peerplay.dim_player`
+    WHERE distinct_id IN ({placeholders})
+    """
+    
+    try:
+        results = client.query(query).result()
+        player_data = {}
+        for row in results:
+            player_data[row.distinct_id] = {
+                "install_date": row.install_date,
+                "last_activity_date": row.last_activity_date
+            }
+        return player_data
+    except Exception as e:
+        print(f"Warning: Error fetching player data from dim_player: {e}")
+        return {}
 
 
 def insert_gdpr_requests(requests: List[Dict]):
@@ -446,6 +506,8 @@ def insert_gdpr_requests(requests: List[Dict]):
             - game_state_status: "completed" or "not started" (default: "not started")
             - is_request_completed: Boolean (default: False)
             - slack_message_ts: Slack message timestamp
+            - install_date: Install date from dim_player (optional, will be fetched if not provided)
+            - last_activity_date: Last activity date from dim_player (optional, will be fetched if not provided)
     """
     if not requests:
         return
@@ -459,6 +521,19 @@ def insert_gdpr_requests(requests: List[Dict]):
     
     ensure_gdpr_table_exists()
     
+    # Fetch player data for all distinct_ids that don't already have it
+    distinct_ids_to_fetch = [
+        req.get("distinct_id") 
+        for req in requests 
+        if req.get("distinct_id") and not req.get("install_date")
+    ]
+    
+    player_data = {}
+    if distinct_ids_to_fetch:
+        print(f"Fetching player data for {len(distinct_ids_to_fetch)} users from dim_player...")
+        player_data = get_player_dates(distinct_ids_to_fetch)
+        print(f"✅ Fetched data for {len(player_data)} users")
+    
     rows_to_insert = []
     inserted_at = datetime.utcnow()
     
@@ -470,8 +545,29 @@ def insert_gdpr_requests(requests: List[Dict]):
         elif request_date and isinstance(request_date, datetime):
             request_date = request_date.date().strftime("%Y-%m-%d")
         
+        # Get player data if not already provided
+        distinct_id = req.get("distinct_id")
+        player_info = player_data.get(distinct_id, {}) if distinct_id else {}
+        
+        # Use provided values or fetch from player_data
+        install_date = req.get("install_date")
+        if not install_date and player_info.get("install_date"):
+            install_date = player_info["install_date"]
+        if install_date and isinstance(install_date, date):
+            install_date = install_date.strftime("%Y-%m-%d")
+        elif install_date and isinstance(install_date, datetime):
+            install_date = install_date.date().strftime("%Y-%m-%d")
+        
+        last_activity_date = req.get("last_activity_date")
+        if not last_activity_date and player_info.get("last_activity_date"):
+            last_activity_date = player_info["last_activity_date"]
+        if last_activity_date and isinstance(last_activity_date, date):
+            last_activity_date = last_activity_date.strftime("%Y-%m-%d")
+        elif last_activity_date and isinstance(last_activity_date, datetime):
+            last_activity_date = last_activity_date.date().strftime("%Y-%m-%d")
+        
         row = {
-            "distinct_id": req.get("distinct_id"),
+            "distinct_id": distinct_id,
             "request_date": request_date,
             "ticket_id": req.get("ticket_id"),
             "mixpanel_request_id": req.get("mixpanel_request_id"),
@@ -482,6 +578,8 @@ def insert_gdpr_requests(requests: List[Dict]):
             "game_state_status": req.get("game_state_status", "not started"),
             "is_request_completed": req.get("is_request_completed", False),
             "slack_message_ts": req.get("slack_message_ts"),
+            "install_date": install_date,
+            "last_activity_date": last_activity_date,
             "inserted_at": inserted_at.isoformat(),
         }
         rows_to_insert.append(row)
