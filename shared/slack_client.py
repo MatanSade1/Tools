@@ -364,7 +364,7 @@ def format_rt_alert_message(
                 },
                 {
                     "type": "mrkdwn",
-                    "text": f"*Current Count:*\n{event_count}"
+                    "text": f"*Distinct Users:*\n{event_count}"
                 },
                 {
                     "type": "mrkdwn",
@@ -547,6 +547,48 @@ def add_reaction_to_message(
         return response.get("ok", False)
     except Exception as e:
         print(f"Error adding reaction {emoji} to message: {e}")
+        return False
+
+
+def remove_reaction(
+    channel_id: str,
+    message_timestamp: str,
+    emoji: str
+) -> bool:
+    """
+    Remove an emoji reaction from a Slack message.
+    
+    Args:
+        channel_id: Slack channel ID
+        message_timestamp: Message timestamp (ts field from message)
+        emoji: Emoji name (e.g., "computer" or "💻")
+    
+    Returns:
+        True if successful, False otherwise
+    """
+    try:
+        from slack_sdk import WebClient
+    except ImportError:
+        raise ImportError("slack-sdk is required. Install it with: pip install slack-sdk")
+    
+    bot_token = get_slack_bot_token()
+    if not bot_token:
+        raise ValueError("SLACK_BOT_TOKEN or SLACK_BOT_TOKEN_NAME must be configured")
+    
+    client = WebClient(token=bot_token)
+    
+    # Remove colons if present (e.g., :computer: -> computer)
+    emoji_clean = emoji.strip(':')
+    
+    try:
+        response = client.reactions_remove(
+            channel=channel_id,
+            timestamp=message_timestamp,
+            name=emoji_clean
+        )
+        return response.get("ok", False)
+    except Exception as e:
+        print(f"Error removing reaction {emoji} from message: {e}")
         return False
 
 
