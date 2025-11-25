@@ -115,7 +115,7 @@ Mixpanel has different credential types for different purposes:
 
 **Optional (have defaults):**
 ```bash
-export RT_MP_DATASET="mixpanel_data"    # Default
+export RT_MP_DATASET="peerplay"    # Default
 export RT_MP_TABLE="rt_mp_events"        # Default
 export GCP_REGION="us-central1"          # Default
 ```

@@ -36,3 +36,4 @@ Thumbs.db
 # GCP
 .gcloudignore
 
+gdpr-handler/.env

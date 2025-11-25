@@ -197,7 +197,7 @@ def send_rt_alert(
     webhook_url: Optional[str] = None,
     start_time: Optional[datetime] = None,
     end_time: Optional[datetime] = None,
-    threshold_type: str = "count",
+    aggregation_type: str = "count distinct users",
     total_active_users: Optional[int] = None,
     percentage: Optional[float] = None
 ):
@@ -213,7 +213,7 @@ def send_rt_alert(
         webhook_url: Custom webhook URL (optional, overrides channel-based lookup)
         start_time: Start time of the aggregation window (optional)
         end_time: End time of the aggregation window (optional)
-        threshold_type: Type of threshold - "count" or "percentage" (default: "count")
+        aggregation_type: Type of aggregation - "count distinct users" or "percentage" (default: "count distinct users")
         total_active_users: Total active users (required for percentage type)
         percentage: Calculated percentage (required for percentage type)
     """
@@ -234,7 +234,7 @@ def send_rt_alert(
         threshold=threshold,
         start_time=start_time,
         end_time=end_time,
-        threshold_type=threshold_type,
+        aggregation_type=aggregation_type,
         total_active_users=total_active_users,
         percentage=percentage
     )
@@ -260,7 +260,7 @@ def format_rt_alert_message(
     threshold: float,
     start_time: Optional[datetime] = None,
     end_time: Optional[datetime] = None,
-    threshold_type: str = "count",
+    aggregation_type: str = "count distinct users",
     total_active_users: Optional[int] = None,
     percentage: Optional[float] = None
 ) -> Dict:
@@ -276,7 +276,7 @@ def format_rt_alert_message(
         threshold: Threshold that was exceeded (count or percentage as float)
         start_time: Start time of the aggregation window (optional)
         end_time: End time of the aggregation window (optional)
-        threshold_type: Type of threshold - "count" or "percentage" (default: "count")
+        aggregation_type: Type of aggregation - "count distinct users" or "percentage" (default: "count distinct users")
         total_active_users: Total active users (for percentage type)
         percentage: Calculated percentage (for percentage type)
     
@@ -295,7 +295,7 @@ def format_rt_alert_message(
         end_time_str = "N/A"
     
     # Build blocks with required format
-    if threshold_type == "percentage" and percentage is not None and total_active_users is not None:
+    if aggregation_type == "percentage" and percentage is not None and total_active_users is not None:
         # Percentage-based alert
         percentage_display = f"{percentage*100:.4f}%"
         threshold_display = f"{threshold*100:.4f}%"
@@ -402,6 +402,136 @@ def get_slack_bot_token() -> Optional[str]:
     """
     config = get_config()
     return config.get("slack_bot_token")
+
+
+def get_user_id_by_email(email: str) -> Optional[str]:
+    """
+    Get Slack user ID from email address.
+    
+    Args:
+        email: User email address
+    
+    Returns:
+        User ID or None if not found
+    """
+    try:
+        from slack_sdk import WebClient
+    except ImportError:
+        raise ImportError("slack-sdk is required. Install it with: pip install slack-sdk")
+    
+    bot_token = get_slack_bot_token()
+    if not bot_token:
+        raise ValueError("SLACK_BOT_TOKEN or SLACK_BOT_TOKEN_NAME must be configured")
+    
+    client = WebClient(token=bot_token)
+    
+    try:
+        response = client.users_lookupByEmail(email=email)
+        if response.get("ok"):
+            return response.get("user", {}).get("id")
+        return None
+    except Exception as e:
+        print(f"Error looking up user by email {email}: {e}")
+        return None
+
+
+def send_slack_dm(user_id: str, message: str) -> bool:
+    """
+    Send a direct message to a Slack user.
+    
+    Args:
+        user_id: Slack user ID (e.g., "U1234567890")
+        message: Message text to send
+    
+    Returns:
+        True if successful, False otherwise
+    """
+    try:
+        from slack_sdk import WebClient
+    except ImportError:
+        raise ImportError("slack-sdk is required. Install it with: pip install slack-sdk")
+    
+    bot_token = get_slack_bot_token()
+    if not bot_token:
+        print("Warning: SLACK_BOT_TOKEN not configured, cannot send DM")
+        return False
+    
+    client = WebClient(token=bot_token)
+    
+    try:
+        # Open a DM conversation with the user
+        conversation_response = client.conversations_open(users=[user_id])
+        if not conversation_response.get("ok"):
+            error = conversation_response.get("error")
+            print(f"Error opening DM with user {user_id}: {error}")
+            return False
+        
+        channel_id = conversation_response.get("channel", {}).get("id")
+        
+        # Send the message
+        response = client.chat_postMessage(
+            channel=channel_id,
+            text=message
+        )
+        
+        if response.get("ok"):
+            print(f"Successfully sent DM to user {user_id}")
+            return True
+        else:
+            error = response.get("error")
+            print(f"Error sending DM: {error}")
+            return False
+    except Exception as e:
+        print(f"Error sending DM to user {user_id}: {e}")
+        return False
+
+
+def send_validation_errors_dm(validation_errors: List[Dict], alert_recipients: List[str]) -> None:
+    """
+    Send validation errors as DMs to configured recipients.
+    
+    Args:
+        validation_errors: List of validation error dictionaries
+        alert_recipients: List of email addresses or user IDs to alert
+    """
+    if not validation_errors:
+        return
+    
+    # Format error message
+    error_lines = ["🚨 *Real-Time Alerts Configuration Validation Errors*\n"]
+    
+    # Group errors by row
+    errors_by_row = {}
+    for error in validation_errors:
+        row_num = error['row_number']
+        if row_num not in errors_by_row:
+            errors_by_row[row_num] = []
+        errors_by_row[row_num].append(error)
+    
+    for row_num in sorted(errors_by_row.keys()):
+        row_errors = errors_by_row[row_num]
+        error_lines.append(f"*Row {row_num}:*")
+        for error in row_errors:
+            error_lines.append(f"  • {error['field']}: {error['error_message']}")
+        error_lines.append("")
+    
+    message = "\n".join(error_lines)
+    
+    # Send to each recipient
+    for recipient in alert_recipients:
+        user_id = None
+        
+        # Check if recipient is already a user ID
+        if recipient.startswith('U') and len(recipient) >= 10:
+            user_id = recipient
+        else:
+            # Assume it's an email address
+            user_id = get_user_id_by_email(recipient)
+        
+        if user_id:
+            send_slack_dm(user_id, message)
+        else:
+            print(f"Warning: Could not find Slack user for {recipient}")
 
 
 def read_slack_channel_messages(

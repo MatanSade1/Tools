@@ -1,12 +1,23 @@
+
 {
   "events": [
     {
       "name": "impression_error_null_pointer_detected",
       "enabled": true,
-      "threshold_type": "count",
+      "aggregation_type": "count distinct users",
       "alert_threshold": 25,
       "alert_channel": "#data-alerts-critical",
-      "meaningful_name": "Null Pointer Error Detected"
+      "meaningful_name": "Null Pointer Error Detected",
+      "match_type": "exact"
+    },
+    {
+      "name": "impression_liveops_not_found",
+      "enabled": false,
+      "aggregation_type": "count distinct users",
+      "alert_threshold": 3,
+      "alert_channel": "#data-alerts-critical",
+      "meaningful_name": "impression_liveops_not_found detected",
+      "match_type": "prefix"
     }
   ],
   "collection_frequency_minutes": 15

@@ -10,6 +10,7 @@ from shared.slack_client import (
     get_channel_id
 )
 from shared.bigquery_client import insert_gdpr_requests
+from api_clients import create_mixpanel_gdpr_request, create_singular_gdpr_request
 
 
 def parse_date(date_str: str) -> date:
@@ -248,15 +249,36 @@ def process_gdpr_requests(
                 error_count += 1
                 continue
             
-            # Create BigQuery record
+            distinct_id = parsed["distinct_id"]
+            print(f"\nProcessing deletion request for user: {distinct_id}")
+            
+            # Create deletion requests in Mixpanel and Singular
+            mixpanel_request_id = None
+            singular_request_id = None
+            
+            # Create Mixpanel GDPR request
+            try:
+                print(f"Creating Mixpanel GDPR deletion request...")
+                mixpanel_request_id = create_mixpanel_gdpr_request(distinct_id, compliance_type="gdpr")
+            except Exception as e:
+                print(f"⚠️  Failed to create Mixpanel request: {e}")
+            
+            # Create Singular GDPR request
+            try:
+                print(f"Creating Singular GDPR deletion request...")
+                singular_request_id = create_singular_gdpr_request(distinct_id)
+            except Exception as e:
+                print(f"⚠️  Failed to create Singular request: {e}")
+            
+            # Create BigQuery record with API request IDs
             gdpr_request = {
-                "distinct_id": parsed["distinct_id"],
+                "distinct_id": distinct_id,
                 "request_date": parsed["request_date"],
                 "ticket_id": parsed["ticket_id"],
-                "mixpanel_request_id": None,
-                "mixpanel_deletion_status": "pending",
-                "singular_request_id": None,
-                "singular_deletion_status": "pending",
+                "mixpanel_request_id": mixpanel_request_id,
+                "mixpanel_deletion_status": "pending" if mixpanel_request_id else "not started",
+                "singular_request_id": singular_request_id,
+                "singular_deletion_status": "pending" if singular_request_id else "not started",
                 "bigquery_deletion_status": "not started",
                 "game_state_status": "not started",
                 "is_request_completed": False,
@@ -270,7 +292,7 @@ def process_gdpr_requests(
             if message_ts:
                 success = add_reaction_to_message(channel_id, message_ts, "computer")
                 if success:
-                    print(f"Added computer emoji to message {message_ts} for user {parsed['distinct_id']}")
+                    print(f"✅ Added computer emoji to message {message_ts} for user {distinct_id}")
                 else:
                     print(f"Warning: Failed to add computer emoji to message {message_ts}")
             

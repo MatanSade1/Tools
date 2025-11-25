@@ -8,6 +8,7 @@ from typing import List, Dict, Optional
 from shared.config import get_config, get_rt_mp_config
 from shared.bigquery_client import insert_events_to_rt_table, query_events_by_hour, query_distinct_users_by_hour, query_total_active_users_by_hour
 from shared.slack_client import send_rt_alert
+from shared.sheets_client import get_config_from_sheets
 
 
 # In-memory cache for last alert time per event
@@ -24,7 +25,24 @@ def rt_mp_collector(request):
     """
     try:
         config = get_config()
-        rt_config = get_rt_mp_config()
+        
+        # Step 0: Read config from Google Sheets if configured
+        sheets_spreadsheet_id = os.getenv("RT_MP_CONFIG_SHEETS_ID")
+        if sheets_spreadsheet_id:
+            try:
+                sheets_range = os.getenv("RT_MP_CONFIG_SHEETS_RANGE", "Sheet1!A:Z")
+                rt_config = get_config_from_sheets(
+                    spreadsheet_id=sheets_spreadsheet_id,
+                    range_name=sheets_range
+                )
+                print(f"Configuration loaded from Google Sheets: {len(rt_config.get('events', []))} events configured")
+            except Exception as e:
+                print(f"Warning: Failed to read config from Google Sheets: {e}")
+                print("Falling back to existing config file")
+                rt_config = get_rt_mp_config()
+        else:
+            # Use existing config file
+            rt_config = get_rt_mp_config()
         
         # Validate configuration
         if not config["mixpanel_api_secret"]:
@@ -63,7 +81,8 @@ def rt_mp_collector(request):
         # Collect events for each configured event
         for event_config in enabled_events:
             event_name = event_config["name"]
-            print(f"Collecting events for: {event_name}")
+            match_type = event_config.get("match_type", "exact")
+            print(f"Collecting events for: {event_name} (match_type: {match_type})")
             
             try:
                 # Pass the full config to allow fetch_mixpanel_events to choose auth method
@@ -72,7 +91,8 @@ def rt_mp_collector(request):
                     start_time=start_time,
                     end_time=end_time,
                     api_secret=config.get("mixpanel_api_secret"),  # May be None if using Service Account
-                    project_id=config["mixpanel_project_id"]
+                    project_id=config["mixpanel_project_id"],
+                    match_type=match_type
                 )
                 
                 print(f"Fetched {len(events)} events for {event_name}")
@@ -106,12 +126,13 @@ def rt_mp_collector(request):
         
         for event_config in enabled_events:
             event_name = event_config["name"]
-            threshold_type = event_config.get("threshold_type", "count")  # "count" or "percentage"
+            aggregation_type = event_config.get("aggregation_type", "count distinct users")  # "count distinct users" or "percentage"
             threshold = event_config.get("alert_threshold", 10)
             channel = event_config.get("alert_channel", "#data-alerts-sandbox")
             meaningful_name = event_config.get("meaningful_name", event_name)
+            match_type = event_config.get("match_type", "exact")
             
-            print(f"Checking threshold for {event_name} (type: {threshold_type}, threshold: {threshold})")
+            print(f"Checking threshold for {event_name} (aggregation: {aggregation_type}, threshold: {threshold}, match_type: {match_type})")
             
             try:
                 # Use Export API to count events in the last 15 minutes
@@ -124,11 +145,12 @@ def rt_mp_collector(request):
                 try:
                     # Count-based: use Export API to count distinct users in the last 15 minutes
                     distinct_user_count = count_distinct_users_export_api(
-                        event_name=event_name,
+                    event_name=event_name,
                         start_time=window_start,
                         end_time=window_end,
                         api_secret=config.get("mixpanel_api_secret"),
-                        project_id=config["mixpanel_project_id"]
+                        project_id=config["mixpanel_project_id"],
+                        match_type=match_type
                     )
                     
                     window_minutes = int((window_end - window_start).total_seconds() / 60)
@@ -140,7 +162,7 @@ def rt_mp_collector(request):
                     # BigQuery not available (local testing) - use collected events
                     print(f"⚠️  BigQuery not available, using collected events (local testing only)")
                     
-                    if threshold_type == "percentage":
+                    if aggregation_type == "percentage":
                         # Calculate from collected events
                         error_user_set = set()
                         total_user_set = set()
@@ -149,8 +171,14 @@ def rt_mp_collector(request):
                             distinct_id = event.get("distinct_id")
                             if distinct_id:
                                 total_user_set.add(distinct_id)
-                                if event.get("event_name") == event_name:
-                                    error_user_set.add(distinct_id)
+                                event_name_from_event = event.get("event_name", "")
+                                # Check if event matches (exact or prefix)
+                                if match_type == "prefix":
+                                    if event_name_from_event.startswith(event_name):
+                                        error_user_set.add(distinct_id)
+                                else:
+                                    if event_name_from_event == event_name:
+                                        error_user_set.add(distinct_id)
                         
                         error_users = len(error_user_set)
                         total_active_users = len(total_user_set)
@@ -168,41 +196,41 @@ def rt_mp_collector(request):
                         print(f"Event count (from collected events): {event_count}")
                         should_alert = event_count > threshold
                 
-                # Check if we've recently alerted for this event (2-hour cooldown)
-                cache_key = f"{event_name}_{window_end.strftime('%Y-%m-%d-%H-%M')}"
-                last_alert = _last_alert_cache.get(cache_key)
-                
-                if last_alert:
-                    time_since_alert = (datetime.utcnow() - last_alert).total_seconds()
-                    if time_since_alert < 7200:  # 2 hours cooldown
-                        should_alert = False
-                        print(f"Skipping alert for {event_name} (alerted {int(time_since_alert/60)} minutes ago)")
-                
-                if should_alert:
-                    print(f"🚨 Alert triggered for {event_name}: {alert_value} distinct users (threshold: {threshold})")
+                    # Check if we've recently alerted for this event (2-hour cooldown)
+                    cache_key = f"{event_name}_{window_end.strftime('%Y-%m-%d-%H-%M')}"
+                    last_alert = _last_alert_cache.get(cache_key)
                     
-                    try:
-                        send_rt_alert(
-                            meaningful_name=meaningful_name,
-                            event_name=event_name,
+                    if last_alert:
+                        time_since_alert = (datetime.utcnow() - last_alert).total_seconds()
+                        if time_since_alert < 7200:  # 2 hours cooldown
+                            should_alert = False
+                            print(f"Skipping alert for {event_name} (alerted {int(time_since_alert/60)} minutes ago)")
+                    
+                    if should_alert:
+                        print(f"🚨 Alert triggered for {event_name}: {alert_value} distinct users (threshold: {threshold})")
+                        
+                        try:
+                            send_rt_alert(
+                                meaningful_name=meaningful_name,
+                                event_name=event_name,
                             event_count=alert_value,
-                            threshold=threshold,
-                            channel=channel,
+                                threshold=threshold,
+                                channel=channel,
                             start_time=window_start,
                             end_time=window_end,
-                            threshold_type="count",
+                            aggregation_type=aggregation_type,
                             total_active_users=None,
                             percentage=None
-                        )
-                        
-                        # Update alert cache
-                        _last_alert_cache[cache_key] = datetime.utcnow()
-                        alerts_sent += 1
-                        
-                    except Exception as e:
-                        print(f"Error sending alert for {event_name}: {e}")
-                        # Continue with other events
-                        continue
+                            )
+                            
+                            # Update alert cache
+                            _last_alert_cache[cache_key] = datetime.utcnow()
+                            alerts_sent += 1
+                            
+                        except Exception as e:
+                            print(f"Error sending alert for {event_name}: {e}")
+                            # Continue with other events
+                            continue
                 else:
                     print(f"No alert needed for {event_name} ({alert_value} <= {threshold})")
                     
@@ -229,12 +257,56 @@ def rt_mp_collector(request):
         raise
 
 
+# Cloud Run Flask app wrapper
+try:
+    from flask import Flask, request as flask_request, jsonify
+    
+    app = Flask(__name__)
+    
+    @app.route('/', methods=['GET', 'POST'])
+    def handle_request():
+        """Cloud Run entry point that wraps the Cloud Function handler."""
+        try:
+            # Create a request-like object for compatibility with Cloud Functions format
+            class CloudRunRequest:
+                def __init__(self, flask_req):
+                    self.method = flask_req.method
+                    self.path = flask_req.path
+                    self.args = flask_req.args
+                    self.json = flask_req.get_json(silent=True)
+                    self.headers = flask_req.headers
+                    self.data = flask_req.get_data()
+            
+            # Call the original function
+            result = rt_mp_collector(CloudRunRequest(flask_request))
+            
+            # Return JSON response
+            if isinstance(result, dict):
+                return jsonify(result), 200
+            else:
+                return jsonify({"status": "success", "result": str(result)}), 200
+                
+        except Exception as e:
+            print(f"Error handling request: {e}")
+            import traceback
+            traceback.print_exc()
+            return jsonify({"status": "error", "message": str(e)}), 500
+    
+    if __name__ == '__main__':
+        app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8080)))
+        
+except ImportError:
+    # Flask not available, running as Cloud Function
+    pass
+
+
 def count_distinct_users_export_api(
     event_name: str,
     start_time: datetime,
     end_time: datetime,
     api_secret: str,
-    project_id: str
+    project_id: str,
+    match_type: str = "exact"
 ) -> int:
     """
     Count distinct users from Mixpanel Export API for a specific event in the time window.
@@ -242,11 +314,12 @@ def count_distinct_users_export_api(
     Uses Mixpanel Export API to count distinct users who had the event.
     
     Args:
-        event_name: Name of the event to count
+        event_name: Name of the event to count (or prefix if match_type is "prefix")
         start_time: Start of time range
         end_time: End of time range
         api_secret: Mixpanel API secret
         project_id: Mixpanel project ID
+        match_type: "exact" for exact match, "prefix" for prefix matching
     
     Returns:
         Count of distinct users who had the event in the time window
@@ -271,11 +344,20 @@ def count_distinct_users_export_api(
     if to_date > today:
         to_date = today
     
-    params = {
-        "from_date": from_date,
-        "to_date": to_date,
-        "event": json.dumps([event_name])
-    }
+    # For prefix matching, we can't filter by event in the API query
+    # We'll query all events and filter by prefix in code
+    if match_type == "prefix":
+        params = {
+            "from_date": from_date,
+            "to_date": to_date
+        }
+        print(f"Using prefix matching for events starting with: {event_name}")
+    else:
+        params = {
+            "from_date": from_date,
+            "to_date": to_date,
+            "event": json.dumps([event_name])
+        }
     
     if not api_secret or not api_secret.strip():
         raise ValueError("Mixpanel API secret is required. Set MIXPANEL_API_SECRET")
@@ -285,46 +367,113 @@ def count_distinct_users_export_api(
     start_timestamp = int(start_time.timestamp())
     end_timestamp = int(end_time.timestamp())
     
-    try:
-        response = requests.get(
-            base_url,
-            params=params,
-            headers={
-                "Authorization": f"Basic {auth}",
-                "Accept": "text/plain",
-                "User-Agent": "RT-MP-Collector/1.0"
-            },
-            stream=True,
-            timeout=300
-        )
-        
-        if response.status_code == 200:
-            distinct_users = set()
-            for line in response.iter_lines():
-                if not line:
-                    continue
+    max_retries = 2
+    retry_count = 0
+    
+    while retry_count <= max_retries:
+        try:
+            response = requests.get(
+                base_url,
+                params=params,
+                headers={
+                    "Authorization": f"Basic {auth}",
+                    "Accept": "text/plain",
+                    "User-Agent": "RT-MP-Collector/1.0"
+                },
+                stream=True,
+                timeout=300
+            )
+            
+            if response.status_code == 200:
+                distinct_users = set()
+                lines_processed = 0
                 
                 try:
-                    event = json.loads(line)
-                    if event.get("event") == event_name:
-                        event_time = event.get("properties", {}).get("time")
-                        if event_time and start_timestamp <= event_time <= end_timestamp:
-                            distinct_id = event.get("properties", {}).get("distinct_id")
-                            if distinct_id:
-                                distinct_users.add(distinct_id)
-                except (json.JSONDecodeError, KeyError, TypeError):
+                    # Wrap iter_lines in try-except to catch connection errors during streaming
+                    for line in response.iter_lines(decode_unicode=True):
+                        if not line:
+                            continue
+                        
+                        lines_processed += 1
+                        
+                        try:
+                            event = json.loads(line)
+                            event_name_from_api = event.get("event", "")
+                            
+                            # Check if event matches (exact or prefix)
+                            matches = False
+                            if match_type == "prefix":
+                                matches = event_name_from_api.startswith(event_name)
+                            else:
+                                matches = event_name_from_api == event_name
+                            
+                            if matches:
+                                event_time = event.get("properties", {}).get("time")
+                                if event_time and start_timestamp <= event_time <= end_timestamp:
+                                    distinct_id = event.get("properties", {}).get("distinct_id")
+                                    if distinct_id:
+                                        distinct_users.add(distinct_id)
+                        except (json.JSONDecodeError, KeyError, TypeError):
+                            continue
+                    
+                    print(f"Successfully processed {lines_processed} lines from Mixpanel Export API")
+                    return len(distinct_users)
+                    
+                except (requests.exceptions.ConnectionError, requests.exceptions.ChunkedEncodingError, 
+                        requests.exceptions.Timeout, OSError) as stream_error:
+                    # Connection error during streaming - retry if we haven't exceeded max retries
+                    print(f"⚠️  Connection error during streaming (processed {lines_processed} lines): {stream_error}")
+                    if retry_count < max_retries:
+                        retry_count += 1
+                        import time
+                        wait_time = retry_count * 2
+                        print(f"Retrying in {wait_time} seconds... (attempt {retry_count}/{max_retries})")
+                        time.sleep(wait_time)
+                        continue
+                    else:
+                        print(f"⚠️  Max retries exceeded. Returning 0 distinct users.")
+                        return 0
+                        
+            elif response.status_code == 429:
+                # Rate limited, wait and retry
+                if retry_count < max_retries:
+                    import time
+                    wait_time = (retry_count + 1) * 5
+                    print(f"Rate limited, waiting {wait_time} seconds...")
+                    time.sleep(wait_time)
+                    retry_count += 1
                     continue
-            
-            return len(distinct_users)
-        else:
-            print(f"⚠️  Mixpanel Export API returned {response.status_code}: {response.text[:200]}")
+                else:
+                    print(f"⚠️  Mixpanel Export API rate limited after {max_retries} retries")
+                    return 0
+            else:
+                print(f"⚠️  Mixpanel Export API returned {response.status_code}: {response.text[:200]}")
+                return 0
+                
+        except (requests.exceptions.RequestException, OSError) as e:
+            # Network or connection error - retry if we haven't exceeded max retries
+            print(f"⚠️  Error connecting to Mixpanel Export API: {e}")
+            if retry_count < max_retries:
+                retry_count += 1
+                import time
+                wait_time = retry_count * 2
+                print(f"Retrying in {wait_time} seconds... (attempt {retry_count}/{max_retries})")
+                time.sleep(wait_time)
+                continue
+            else:
+                print(f"⚠️  Max retries exceeded. Error: {e}")
+                import traceback
+                traceback.print_exc()
+                return 0
+        except Exception as e:
+            # Other unexpected errors - don't retry
+            print(f"⚠️  Unexpected error counting events from Mixpanel Export API: {e}")
+            import traceback
+            traceback.print_exc()
             return 0
-            
-    except Exception as e:
-        print(f"⚠️  Error counting events from Mixpanel Export API: {e}")
-        import traceback
-        traceback.print_exc()
-        return 0
+    
+    # Should not reach here, but return 0 as fallback
+    return 0
 
 
 def fetch_mixpanel_events(
@@ -332,17 +481,19 @@ def fetch_mixpanel_events(
     start_time: datetime,
     end_time: datetime,
     api_secret: str,
-    project_id: str
+    project_id: str,
+    match_type: str = "exact"
 ) -> List[Dict]:
     """
     Fetch events from Mixpanel Export API.
     
     Args:
-        event_name: Name of the event to fetch
+        event_name: Name of the event to fetch (or prefix if match_type is "prefix")
         start_time: Start of time range
         end_time: End of time range
         api_secret: Mixpanel API secret
         project_id: Mixpanel project ID
+        match_type: "exact" for exact match, "prefix" for prefix matching
     
     Returns:
         List of event dictionaries
@@ -377,12 +528,20 @@ def fetch_mixpanel_events(
     all_events = []
     
     # Mixpanel Export API parameters
-    # Optionally filter by event name in query (more efficient)
-    params = {
-        "from_date": from_date,
-        "to_date": to_date,
-        "event": json.dumps([event_name])  # Filter by event name in query string
-    }
+    # For prefix matching, we can't filter by event in the API query
+    # We'll query all events and filter by prefix in code
+    if match_type == "prefix":
+        params = {
+            "from_date": from_date,
+            "to_date": to_date
+        }
+        print(f"Using prefix matching for events starting with: {event_name}")
+    else:
+        params = {
+            "from_date": from_date,
+            "to_date": to_date,
+            "event": json.dumps([event_name])  # Filter by event name in query string
+        }
     
     # Mixpanel Export API authentication
     # Based on working example: use base64 encoded Basic auth in header
@@ -426,25 +585,48 @@ def fetch_mixpanel_events(
                 end_timestamp = int(end_time.timestamp())
                 
                 event_count = 0
-                for line in response.iter_lines():
-                    if not line:
-                        continue
-                    
-                    try:
-                        event = json.loads(line)
-                        event_count += 1
+                try:
+                    # Wrap iter_lines in try-except to catch connection errors during streaming
+                    for line in response.iter_lines(decode_unicode=True):
+                        if not line:
+                            continue
                         
-                        # Filter by event name (though we already filtered in query)
-                        if event.get("event") == event_name:
-                            # Filter by timestamp within our window
-                            event_time = event.get("properties", {}).get("time")
-                            if event_time and start_timestamp <= event_time <= end_timestamp:
-                                all_events.append(transform_mixpanel_event(event))
-                    except (json.JSONDecodeError, KeyError, TypeError) as e:
-                        continue
-                
-                print(f"Processed {event_count} events from Mixpanel, {len(all_events)} matched criteria")
-                break
+                        try:
+                            event = json.loads(line)
+                            event_count += 1
+                            event_name_from_api = event.get("event", "")
+                            
+                            # Check if event matches (exact or prefix)
+                            matches = False
+                            if match_type == "prefix":
+                                matches = event_name_from_api.startswith(event_name)
+                            else:
+                                matches = event_name_from_api == event_name
+                            
+                            if matches:
+                                # Filter by timestamp within our window
+                                event_time = event.get("properties", {}).get("time")
+                                if event_time and start_timestamp <= event_time <= end_timestamp:
+                                    all_events.append(transform_mixpanel_event(event))
+                        except (json.JSONDecodeError, KeyError, TypeError) as e:
+                            continue
+                    
+                    print(f"Processed {event_count} events from Mixpanel, {len(all_events)} matched criteria")
+                    break
+                    
+                except (requests.exceptions.ConnectionError, requests.exceptions.ChunkedEncodingError, 
+                        requests.exceptions.Timeout, OSError) as stream_error:
+                    # Connection error during streaming - retry
+                    print(f"⚠️  Connection error during streaming (processed {event_count} events): {stream_error}")
+                    retry_count += 1
+                    if retry_count >= max_retries:
+                        print(f"⚠️  Max retries exceeded. Returning {len(all_events)} events collected so far.")
+                        break
+                    import time
+                    wait_time = retry_count * 2
+                    print(f"Retrying in {wait_time} seconds... (attempt {retry_count + 1}/{max_retries})")
+                    time.sleep(wait_time)
+                    continue
                 
             elif response.status_code == 400:
                 # Bad Request - log detailed error
@@ -912,59 +1094,72 @@ def fetch_total_active_users_from_mixpanel(
             earliest_event_time = None
             latest_event_time = None
             
-            for line in response.iter_lines():
-                if not line:
-                    continue
-                
-                if event_count >= max_events:
-                    print(f"⚠️  Reached processing limit ({max_events} events), found {events_in_window} in time window")
-                    print(f"   Events before window: {events_before_window}, after window: {events_after_window}")
-                    if earliest_event_time:
-                        print(f"   Earliest event: {datetime.fromtimestamp(earliest_event_time)} UTC (timestamp: {earliest_event_time})")
-                    if latest_event_time:
-                        print(f"   Latest event: {datetime.fromtimestamp(latest_event_time)} UTC (timestamp: {latest_event_time})")
-                    print(f"   Target window: {start_time} to {end_time} UTC (timestamps: {start_timestamp} to {end_timestamp})")
-                    break
-                
-                try:
-                    event = json.loads(line)
-                    event_count += 1
+            try:
+                # Wrap iter_lines in try-except to catch connection errors during streaming
+                for line in response.iter_lines(decode_unicode=True):
+                    if not line:
+                        continue
                     
-                    # Filter by timestamp within our window
-                    event_time = event.get("properties", {}).get("time")
-                    if event_time:
-                        # Track earliest and latest event times
-                        if earliest_event_time is None or event_time < earliest_event_time:
-                            earliest_event_time = event_time
-                        if latest_event_time is None or event_time > latest_event_time:
-                            latest_event_time = event_time
+                    if event_count >= max_events:
+                        print(f"⚠️  Reached processing limit ({max_events} events), found {events_in_window} in time window")
+                        print(f"   Events before window: {events_before_window}, after window: {events_after_window}")
+                        if earliest_event_time:
+                            print(f"   Earliest event: {datetime.fromtimestamp(earliest_event_time)} UTC (timestamp: {earliest_event_time})")
+                        if latest_event_time:
+                            print(f"   Latest event: {datetime.fromtimestamp(latest_event_time)} UTC (timestamp: {latest_event_time})")
+                        print(f"   Target window: {start_time} to {end_time} UTC (timestamps: {start_timestamp} to {end_timestamp})")
+                        break
+                    
+                    try:
+                        event = json.loads(line)
+                        event_count += 1
                         
-                        if event_time < start_timestamp:
-                            events_before_window += 1
-                        elif event_time > end_timestamp:
-                            events_after_window += 1
-                        elif start_timestamp <= event_time <= end_timestamp:
-                            events_in_window += 1
-                            distinct_id = event.get("properties", {}).get("distinct_id")
-                            if distinct_id:
-                                distinct_users.add(distinct_id)
-                        
-                        # Log first few events and periodic updates for debugging
-                        if event_count <= 10 or event_count % 100000 == 0:
-                            dt = datetime.fromtimestamp(event_time)
-                            in_window = start_timestamp <= event_time <= end_timestamp
-                            print(f"  Event {event_count}: timestamp={event_time} ({dt} UTC), in_window={in_window}, events_in_window={events_in_window}, distinct_users={len(distinct_users)}")
-                except (json.JSONDecodeError, KeyError, TypeError) as e:
-                    if event_count <= 5:
-                        print(f"  Error parsing event {event_count}: {e}")
-                    continue
-            
-            if events_in_window == 0:
-                print(f"⚠️  Processed {event_count} events but found 0 in time window, using BigQuery fallback")
-                return query_total_active_users_by_hour(start_time, end_time)
-            
-            print(f"Processed {event_count} events from Mixpanel ({events_in_window} in time window), found {len(distinct_users)} distinct active users")
-            return len(distinct_users)
+                        # Filter by timestamp within our window
+                        event_time = event.get("properties", {}).get("time")
+                        if event_time:
+                            # Track earliest and latest event times
+                            if earliest_event_time is None or event_time < earliest_event_time:
+                                earliest_event_time = event_time
+                            if latest_event_time is None or event_time > latest_event_time:
+                                latest_event_time = event_time
+                            
+                            if event_time < start_timestamp:
+                                events_before_window += 1
+                            elif event_time > end_timestamp:
+                                events_after_window += 1
+                            elif start_timestamp <= event_time <= end_timestamp:
+                                events_in_window += 1
+                                distinct_id = event.get("properties", {}).get("distinct_id")
+                                if distinct_id:
+                                    distinct_users.add(distinct_id)
+                            
+                            # Log first few events and periodic updates for debugging
+                            if event_count <= 10 or event_count % 100000 == 0:
+                                dt = datetime.fromtimestamp(event_time)
+                                in_window = start_timestamp <= event_time <= end_timestamp
+                                print(f"  Event {event_count}: timestamp={event_time} ({dt} UTC), in_window={in_window}, events_in_window={events_in_window}, distinct_users={len(distinct_users)}")
+                    except (json.JSONDecodeError, KeyError, TypeError) as e:
+                        if event_count <= 5:
+                            print(f"  Error parsing event {event_count}: {e}")
+                        continue
+                
+                if events_in_window == 0:
+                    print(f"⚠️  Processed {event_count} events but found 0 in time window, using BigQuery fallback")
+                    return query_total_active_users_by_hour(start_time, end_time)
+                
+                print(f"Processed {event_count} events from Mixpanel ({events_in_window} in time window), found {len(distinct_users)} distinct active users")
+                return len(distinct_users)
+                
+            except (requests.exceptions.ConnectionError, requests.exceptions.ChunkedEncodingError, 
+                    requests.exceptions.Timeout, OSError) as stream_error:
+                # Connection error during streaming
+                print(f"⚠️  Connection error during streaming (processed {event_count} events): {stream_error}")
+                if events_in_window == 0:
+                    print(f"⚠️  No events processed in time window, using BigQuery fallback")
+                    return query_total_active_users_by_hour(start_time, end_time)
+                else:
+                    print(f"⚠️  Returning partial result: {len(distinct_users)} distinct users from {events_in_window} events")
+                    return len(distinct_users)
         else:
             print(f"⚠️  Mixpanel Export API returned {response.status_code}, using BigQuery fallback")
             return query_total_active_users_by_hour(start_time, end_time)

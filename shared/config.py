@@ -96,6 +96,8 @@ def get_secret(secret_name: str, project_id: Optional[str] = None) -> Optional[s
         return response.payload.data.decode("UTF-8")
     except Exception as e:
         print(f"Error accessing secret {secret_name}: {e}")
+        import traceback
+        traceback.print_exc()
         return None
 
 
@@ -137,11 +139,41 @@ def get_config() -> Dict:
     if not slack_bot_token:
         slack_bot_token = os.getenv("SLACK_BOT_TOKEN")
     
+    # Mixpanel GDPR Token (for GDPR deletion requests)
+    mixpanel_gdpr_token_name = os.getenv("MIXPANEL_GDPR_TOKEN_NAME")
+    mixpanel_gdpr_token = None
+    if mixpanel_gdpr_token_name and project_id:
+        mixpanel_gdpr_token = get_secret(mixpanel_gdpr_token_name, project_id)
+    
+    # Fall back to environment variable
+    if not mixpanel_gdpr_token:
+        mixpanel_gdpr_token = os.getenv("MIXPANEL_GDPR_TOKEN")
+    
+    # Singular API credentials (for OpenDSR GDPR requests)
+    singular_api_key_name = os.getenv("SINGULAR_API_KEY_NAME")
+    singular_api_key = None
+    if singular_api_key_name and project_id:
+        singular_api_key = get_secret(singular_api_key_name, project_id)
+    
+    # Fall back to environment variable
+    if not singular_api_key:
+        singular_api_key = os.getenv("SINGULAR_API_KEY")
+    
+    singular_api_secret_name = os.getenv("SINGULAR_API_SECRET_NAME")
+    singular_api_secret = None
+    if singular_api_secret_name and project_id:
+        singular_api_secret = get_secret(singular_api_secret_name, project_id)
+    
+    # Fall back to environment variable
+    if not singular_api_secret:
+        singular_api_secret = os.getenv("SINGULAR_API_SECRET")
+    
     return {
         "mixpanel_api_secret": mixpanel_api_secret,
         "mixpanel_service_account_username": service_account_username,
         "mixpanel_service_account_secret": service_account_secret,
         "mixpanel_project_id": os.getenv("MIXPANEL_PROJECT_ID"),
+        "mixpanel_gdpr_token": mixpanel_gdpr_token,
         "gcp_project_id": project_id,
         "bigquery_dataset": os.getenv("BIGQUERY_DATASET", "mixpanel_data"),
         "bigquery_table": os.getenv("BIGQUERY_TABLE", "mixpanel_events"),
@@ -150,6 +182,8 @@ def get_config() -> Dict:
         "slack_webhook_url": os.getenv("SLACK_WEBHOOK_URL"),
         "slack_bot_token": slack_bot_token,
         "gdpr_slack_channel": os.getenv("GDPR_SLACK_CHANNEL", "users-to-delete-their-personal-data"),
+        "singular_api_key": singular_api_key,
+        "singular_api_secret": singular_api_secret,
     }
 
 

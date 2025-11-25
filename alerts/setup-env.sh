@@ -65,8 +65,8 @@ echo ""
 read -p "GCP Region [us-central1]: " GCP_REGION
 GCP_REGION=${GCP_REGION:-us-central1}
 
-read -p "BigQuery Dataset [mixpanel_data]: " RT_MP_DATASET
-RT_MP_DATASET=${RT_MP_DATASET:-mixpanel_data}
+read -p "BigQuery Dataset [peerplay]: " RT_MP_DATASET
+RT_MP_DATASET=${RT_MP_DATASET:-peerplay}
 
 read -p "BigQuery Table [rt_mp_events]: " RT_MP_TABLE
 RT_MP_TABLE=${RT_MP_TABLE:-rt_mp_events}

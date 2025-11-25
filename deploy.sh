@@ -177,8 +177,8 @@ echo "Prepared rt-mp-collector in: $RT_MP_COLLECTOR_DIR"
 # Build environment variables for rt-mp-collector
 RT_MP_COLLECTOR_ENV_VARS="MIXPANEL_PROJECT_ID=$MIXPANEL_PROJECT_ID,GCP_PROJECT_ID=$PROJECT_ID,SLACK_WEBHOOK_URL=$SLACK_WEBHOOK_URL"
 
-# Add RT table config (defaults to mixpanel_data.rt_mp_events)
-RT_MP_DATASET=${RT_MP_DATASET:-mixpanel_data}
+# Add RT table config (defaults to peerplay.rt_mp_events)
+RT_MP_DATASET=${RT_MP_DATASET:-peerplay}
 RT_MP_TABLE=${RT_MP_TABLE:-rt_mp_events}
 RT_MP_COLLECTOR_ENV_VARS="$RT_MP_COLLECTOR_ENV_VARS,RT_MP_DATASET=$RT_MP_DATASET,RT_MP_TABLE=$RT_MP_TABLE"
 
