@@ -28,10 +28,19 @@ This service reads alert configurations from a BigQuery table (`yotam-395120.pee
 
 ## BigQuery Tables
 
-### Configuration Table
+### Configuration Tables
+
+**Production Table:**
 - **Table**: `yotam-395120.peerplay.bigquery_alerts_to_slack_settings`
-- **Purpose**: Stores alert configurations
-- **Key Fields**:
+- **Purpose**: Stores alert configurations for production
+- **Used by**: Cloud Run service and local runs (default)
+
+**Stage Table (Test Mode):**
+- **Table**: `yotam-395120.peerplay.bigquery_alerts_to_slack_settings_stage`
+- **Purpose**: Stores alert configurations for testing
+- **Used by**: Local runs with `--test` flag or `TEST_MODE=true`
+
+**Key Fields** (both tables):
   - `name`: Alert name
   - `description`: Alert description
   - `sql`: SQL query to execute
@@ -43,10 +52,19 @@ This service reads alert configurations from a BigQuery table (`yotam-395120.pee
   - `threshold_for_alerting`: Minimum value to trigger alert
   - `max_hourly_alerts_per_day`: Daily limit for hourly alerts
 
-### History Table
+### History Tables
+
+**Production Table:**
 - **Table**: `yotam-395120.peerplay.bigquery_alerts_execution_history`
-- **Purpose**: Tracks alert execution history for cooldown management
-- **Key Fields**:
+- **Purpose**: Tracks alert execution history for cooldown management (production)
+- **Used by**: Cloud Run service and local runs (default)
+
+**Stage Table (Test Mode):**
+- **Table**: `yotam-395120.peerplay.bigquery_alerts_execution_history_stage`
+- **Purpose**: Tracks alert execution history for testing
+- **Used by**: Local runs with `--test` flag or `TEST_MODE=true`
+
+**Key Fields** (both tables):
   - `alert_id`: Alert identifier
   - `execution_timestamp`: When the alert was executed
   - `execution_date`: Date of execution
@@ -81,6 +99,63 @@ Daily alerts (resolution='D') only execute between **4:50 AM and 5:49 AM** UTC.
    python main.py [H|D]
    ```
    Optional: Pass 'H' for hourly alerts or 'D' for daily alerts
+
+## Test Mode
+
+Test mode allows you to run the service locally using **stage tables** instead of production tables. This is useful for testing alert configurations without affecting production data.
+
+### How Test Mode Works
+
+When test mode is enabled:
+- **Settings table**: Uses `yotam-395120.peerplay.bigquery_alerts_to_slack_settings_stage` instead of `yotam-395120.peerplay.bigquery_alerts_to_slack_settings`
+- **History table**: Uses `yotam-395120.peerplay.bigquery_alerts_execution_history_stage` instead of `yotam-395120.peerplay.bigquery_alerts_execution_history`
+- Alerts still send to Slack (same channels), but execution history is tracked separately
+
+### Enabling Test Mode
+
+**Option 1: Command line flag**
+```bash
+python main.py --test
+python main.py H --test      # Run hourly alerts in test mode
+python main.py D --test      # Run daily alerts in test mode
+```
+
+**Option 2: Environment variable**
+```bash
+export TEST_MODE=true
+python main.py
+```
+
+**Option 3: Both**
+```bash
+export TEST_MODE=true
+python main.py H --test
+```
+
+### Test Mode Examples
+
+```bash
+# Run all alerts in test mode
+python main.py --test
+
+# Run only hourly alerts in test mode
+python main.py H --test
+
+# Run only daily alerts in test mode
+python main.py D --test
+
+# Or use the convenience script
+./run-test.sh        # Run all alerts in test mode
+./run-test.sh H      # Run hourly alerts in test mode
+./run-test.sh D      # Run daily alerts in test mode
+```
+
+### Important Notes
+
+- Test mode is **disabled** when running on Cloud Run (production only)
+- Test mode uses stage tables, so make sure they exist and have the same schema as production tables
+- Slack alerts will still be sent (same channels), so be careful when testing
+- Execution history is tracked separately in the stage history table
 
 ## Deployment
 

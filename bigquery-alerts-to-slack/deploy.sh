@@ -20,7 +20,7 @@ gcloud run deploy $SERVICE_NAME \
   --region $REGION \
   --project $PROJECT_ID \
   --service-account $SERVICE_ACCOUNT \
-  --set-env-vars FUNCTION_TARGET=run_alerts \
+  --set-env-vars FUNCTION_TARGET=run_alerts,GUNICORN_TIMEOUT=120 \
   --allow-unauthenticated \
   --memory 1Gi \
   --cpu 1 \

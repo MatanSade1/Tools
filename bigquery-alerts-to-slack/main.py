@@ -11,10 +11,18 @@ import json
 from typing import Dict, Any
 import requests
 from dataclasses import dataclass
-from flask import jsonify
+from flask import Flask, jsonify, request as flask_request
 import google.cloud.logging
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 
 def setup_logging():
+    # Get logger first (singleton pattern - same instance returned)
+    logger = logging.getLogger('BigQueryAlerts')
+    
+    # If logger already has handlers configured, return it to avoid duplicates
+    if logger.handlers:
+        return logger
+    
     # Check if running in Cloud environment
     if os.getenv('FUNCTION_TARGET') or os.getenv('K_SERVICE'):
         # Running in Cloud Run/Cloud Functions - use Cloud Logging
@@ -26,36 +34,43 @@ def setup_logging():
             # This maps Python logging levels to Cloud Logging severity levels
             logging_client.setup_logging()
             
-            logger = logging.getLogger('BigQueryAlerts')
             logger.setLevel(logging.INFO)
+            # Prevent propagation to root logger to avoid duplicate logs
+            # setup_logging() adds a handler to root logger, and by default child loggers propagate
+            logger.propagate = False
+            
+            # Add Cloud Logging handler directly to this logger
+            cloud_handler = logging_client.get_default_handler()
+            logger.addHandler(cloud_handler)
+            
             logger.info("✅ Cloud Logging integration enabled - severity levels will be correct")
             
         except Exception as e:
             # Fallback if Cloud Logging setup fails
-            logger = logging.getLogger('BigQueryAlerts')
             logger.setLevel(logging.INFO)
-            handler = logging.StreamHandler()
-            handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
-            logger.addHandler(handler)
+            # Only add handler if not already present
+            if not logger.handlers:
+                handler = logging.StreamHandler()
+                handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+                logger.addHandler(handler)
             logger.warning(f"Cloud Logging setup failed, using standard logging: {e}")
         
     else:
         # Running locally - use file-based logging
-        log_dir = Path('logs')
-        log_dir.mkdir(exist_ok=True)
-        log_file = log_dir / f"bigquery_alerts_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
-        
-        logger = logging.getLogger('BigQueryAlerts')
         logger.setLevel(logging.INFO)
         
         formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
         
-        # Console handler
-        console_handler = logging.StreamHandler()
-        console_handler.setFormatter(formatter)
-        logger.addHandler(console_handler)
+        # Console handler (only add if not already present)
+        if not any(isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler) for h in logger.handlers):
+            console_handler = logging.StreamHandler()
+            console_handler.setFormatter(formatter)
+            logger.addHandler(console_handler)
         
-        # File handler
+        # File handler (create new file each time for local runs)
+        log_dir = Path('logs')
+        log_dir.mkdir(exist_ok=True)
+        log_file = log_dir / f"bigquery_alerts_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
         file_handler = logging.FileHandler(log_file)
         file_handler.setFormatter(formatter)
         logger.addHandler(file_handler)
@@ -79,6 +94,28 @@ class AlertConfig:
     threshold_for_alerting: int = None
     max_hourly_alerts_per_day: int = None
 
+def is_test_mode():
+    """Check if running in test mode based on environment variable or command line"""
+    # Check environment variable first
+    if os.getenv('TEST_MODE', '').lower() in ['true', '1', 'yes']:
+        return True
+    # Check command line arguments
+    if '--test' in sys.argv or '--test-mode' in sys.argv:
+        return True
+    return False
+
+def get_settings_table_name():
+    """Get the settings table name based on test mode"""
+    if is_test_mode():
+        return 'yotam-395120.peerplay.bigquery_alerts_to_slack_settings_stage'
+    return 'yotam-395120.peerplay.bigquery_alerts_to_slack_settings'
+
+def get_history_table_name():
+    """Get the history table name based on test mode"""
+    if is_test_mode():
+        return 'yotam-395120.peerplay.bigquery_alerts_execution_history_stage'
+    return 'yotam-395120.peerplay.bigquery_alerts_execution_history'
+
 def is_execution_time_for_daily_alerts():
     """Check if current time is between 4:50AM and 5:49AM"""
     current_time = datetime.now().time()
@@ -87,8 +124,11 @@ def is_execution_time_for_daily_alerts():
     
     return start_time <= current_time <= end_time
 
-def load_alerts_from_bigquery(client, resolution=None):
-    query = """
+def load_alerts_from_bigquery(client, resolution=None, settings_table=None):
+    if settings_table is None:
+        settings_table = get_settings_table_name()
+    
+    query = f"""
     SELECT 
         name, 
         description, 
@@ -103,7 +143,7 @@ def load_alerts_from_bigquery(client, resolution=None):
         notion_doc_link,
         threshold_for_alerting,
         max_hourly_alerts_per_day
-    FROM `yotam-395120.peerplay.bigquery_alerts_to_slack_settings`
+    FROM `{settings_table}`
     WHERE is_active = 'T'
     """
     if resolution:
@@ -198,18 +238,29 @@ def setup_credentials():
     
     # Local execution path
     creds_path = os.getenv('GOOGLE_APPLICATION_CREDENTIALS')
-    if not creds_path:
-        # Fallback to the default path if environment variable is not set
-        creds_path = "/Users/guyzamir/Documents/Code/bigquery_alerts/json_key/yotam-395120-204239134151.json"
     
-    logger.info(f"Looking for credentials at: {creds_path}")
-    
-    if not os.path.exists(creds_path):
-        error_msg = f"Credentials file not found at: {creds_path}"
-        logger.error(error_msg)
-        raise FileNotFoundError(error_msg)
-    
-    os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = creds_path
+    # If GOOGLE_APPLICATION_CREDENTIALS is set, use it
+    if creds_path and os.path.exists(creds_path):
+        logger.info(f"Using credentials from GOOGLE_APPLICATION_CREDENTIALS: {creds_path}")
+        os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = creds_path
+    else:
+        # Try to use Application Default Credentials (ADC)
+        logger.info("GOOGLE_APPLICATION_CREDENTIALS not set or file not found, attempting to use Application Default Credentials")
+        try:
+            # Test if ADC is available
+            credentials, project = google.auth.default()
+            logger.info("✅ Application Default Credentials found")
+        except Exception as e:
+            # Fallback to hardcoded path (for backward compatibility)
+            fallback_path = "/Users/guyzamir/Documents/Code/bigquery_alerts/json_key/yotam-395120-204239134151.json"
+            if os.path.exists(fallback_path):
+                logger.info(f"Using fallback credentials path: {fallback_path}")
+                os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = fallback_path
+                creds_path = fallback_path
+            else:
+                error_msg = f"Credentials not found. Please set GOOGLE_APPLICATION_CREDENTIALS or configure Application Default Credentials. Fallback path also not found: {fallback_path}"
+                logger.error(error_msg)
+                raise FileNotFoundError(error_msg)
     
     # For local execution, also add Drive scopes
     try:
@@ -221,7 +272,10 @@ def setup_credentials():
             ]
         )
         
-        logger.info(f"✅ Using credentials from: {creds_path} with Drive and BigQuery scopes")
+        if creds_path:
+            logger.info(f"✅ Using credentials from: {creds_path} with Drive and BigQuery scopes")
+        else:
+            logger.info(f"✅ Using Application Default Credentials with Drive and BigQuery scopes")
         return bigquery.Client(credentials=credentials, project=project)
         
     except Exception as e:
@@ -230,16 +284,28 @@ def setup_credentials():
         return bigquery.Client()
 
 class AlertProcessor:
-    def __init__(self, resolution=None):
+    def __init__(self, resolution=None, test_mode=None):
         self.logger = setup_logging()
+        self.test_mode = test_mode if test_mode is not None else is_test_mode()
+        
+        if self.test_mode:
+            self.logger.info("🧪 TEST MODE ENABLED - Using stage tables")
+        else:
+            self.logger.info("🚀 PRODUCTION MODE - Using production tables")
+        
         self.logger.info("Initializing Alert Processor")
         current_time = datetime.now()
         self.logger.info(f"Current execution time: {current_time.strftime('%Y-%m-%d %H:%M:%S')}")
         
         try:
             self.client = setup_credentials()
-            self.alerts = load_alerts_from_bigquery(self.client, resolution)
-            self.logger.info(f"Loaded {len(self.alerts)} active alerts from BigQuery for resolution {resolution}")
+            # Use stage table in test mode, production table otherwise
+            if self.test_mode:
+                settings_table = 'yotam-395120.peerplay.bigquery_alerts_to_slack_settings_stage'
+            else:
+                settings_table = 'yotam-395120.peerplay.bigquery_alerts_to_slack_settings'
+            self.alerts = load_alerts_from_bigquery(self.client, resolution, settings_table)
+            self.logger.info(f"Loaded {len(self.alerts)} active alerts from BigQuery table: {settings_table} for resolution {resolution}")
             
             # Test the history table exists and is accessible
             self.verify_history_table()
@@ -251,14 +317,18 @@ class AlertProcessor:
     def verify_history_table(self):
         """Verify that the history table exists and is accessible"""
         try:
-            test_query = """
+            if self.test_mode:
+                history_table = 'yotam-395120.peerplay.bigquery_alerts_execution_history_stage'
+            else:
+                history_table = 'yotam-395120.peerplay.bigquery_alerts_execution_history'
+            test_query = f"""
             SELECT COUNT(*) as count 
-            FROM `yotam-395120.peerplay.bigquery_alerts_execution_history` 
+            FROM `{history_table}` 
             WHERE 1=0
             """
             query_job = self.client.query(test_query)
             query_job.result()
-            self.logger.info("History table verified and accessible")
+            self.logger.info(f"History table verified and accessible: {history_table}")
         except Exception as e:
             self.logger.error(f"History table verification failed: {str(e)}")
             self.logger.error("This will prevent cooldown functionality from working properly")
@@ -279,9 +349,13 @@ class AlertProcessor:
         current_date = date.today()
         
         # Query to count how many alerts were generated today for this alert_id
-        cooldown_query = """
+        if self.test_mode:
+            history_table = 'yotam-395120.peerplay.bigquery_alerts_execution_history_stage'
+        else:
+            history_table = 'yotam-395120.peerplay.bigquery_alerts_execution_history'
+        cooldown_query = f"""
         SELECT COUNT(*) as alerts_sent_today
-        FROM `yotam-395120.peerplay.bigquery_alerts_execution_history`
+        FROM `{history_table}`
         WHERE alert_id = @alert_id
           AND execution_date = @current_date
           AND alert_generated = TRUE
@@ -297,10 +371,50 @@ class AlertProcessor:
         
         try:
             self.logger.info(f"Checking cooldown for alert_id {alert.alert_id} on date {current_date}")
-            query_job = self.client.query(cooldown_query, job_config=job_config)
-            results = query_job.result()
             
-            for row in results:
+            # Add timeout to prevent hanging queries (45 seconds total for cooldown check)
+            # Use ThreadPoolExecutor to ensure timeout is enforced even if BigQuery client hangs
+            # Wrap both query submission and result waiting in timeout
+            # Increased timeouts to allow for table operations after cleanup
+            query_job = None
+            try:
+                with ThreadPoolExecutor(max_workers=1) as executor:
+                    # Submit the query in a thread with timeout
+                    future_query = executor.submit(self.client.query, cooldown_query, job_config)
+                    query_job = future_query.result(timeout=15)  # 15 seconds to submit query
+                    
+                    # Wait for query result with timeout
+                    future_result = executor.submit(query_job.result, timeout=15)
+                    results = future_result.result(timeout=15)  # 15 seconds to get result
+            except (FuturesTimeoutError, Exception) as timeout_error:
+                # Try to cancel the query job to free up resources
+                if query_job:
+                    try:
+                        query_job.cancel()
+                        self.logger.info(f"Cancelled timed-out cooldown query job for alert '{alert.name}' (ID: {alert.alert_id})")
+                    except Exception as cancel_error:
+                        self.logger.warning(f"Failed to cancel cooldown query job: {str(cancel_error)}")
+                
+                self.logger.warning(
+                    f"Cooldown check query timed out for alert '{alert.name}' (ID: {alert.alert_id}). "
+                    f"Allowing alert to proceed (fail open). Error: {str(timeout_error)}"
+                )
+                return True  # Fail open - allow alert if we can't check cooldown
+            
+            # Wrap result iteration in timeout as well - iteration can trigger additional API calls
+            try:
+                with ThreadPoolExecutor(max_workers=1) as executor:
+                    # Convert results to list with timeout (this forces all pages to be fetched)
+                    future_list = executor.submit(lambda: list(results))
+                    rows_list = future_list.result(timeout=15)  # 15 seconds to iterate/fetch all pages
+            except (FuturesTimeoutError, Exception) as iteration_timeout:
+                self.logger.warning(
+                    f"Cooldown check result iteration timed out for alert '{alert.name}' (ID: {alert.alert_id}). "
+                    f"Allowing alert to proceed (fail open). Error: {str(iteration_timeout)}"
+                )
+                return True  # Fail open - allow alert if we can't iterate results
+            
+            for row in rows_list:
                 alerts_sent_today = row.alerts_sent_today
                 
                 self.logger.info(
@@ -354,8 +468,12 @@ class AlertProcessor:
         resolution_str = str(alert.resolution) if alert.resolution is not None else ""
         error_message_str = str(error_message) if error_message is not None else ""
         
-        insert_query = """
-        INSERT INTO `yotam-395120.peerplay.bigquery_alerts_execution_history`
+        if self.test_mode:
+            history_table = 'yotam-395120.peerplay.bigquery_alerts_execution_history_stage'
+        else:
+            history_table = 'yotam-395120.peerplay.bigquery_alerts_execution_history'
+        insert_query = f"""
+        INSERT INTO `{history_table}`
         (alert_id, alert_name, execution_timestamp, execution_date, alert_generated, 
          row_count, threshold_value, slack_channel, resolution, success, error_message)
         VALUES (@alert_id, @alert_name, @execution_timestamp, @execution_date, @alert_generated,
@@ -383,8 +501,38 @@ class AlertProcessor:
             self.logger.info(f"Attempting to log execution for alert '{alert.name}' (ID: {alert_id_int})")
             self.logger.info(f"Log parameters: alert_generated={alert_generated_bool}, success={success_bool}, date={current_date}")
             
-            query_job = self.client.query(insert_query, job_config=job_config)
-            query_job.result()  # Wait for the job to complete
+            # Create a separate BigQuery client for execution logging to avoid connection pool issues
+            # If the main client's connection is blocked, this ensures execution logging can still proceed
+            logging_client = setup_credentials()
+            
+            # Add timeout to prevent hanging queries (35 seconds total for execution logging)
+            # Use ThreadPoolExecutor to ensure timeout is enforced even if BigQuery client hangs
+            # Wrap both query submission and result waiting in timeout
+            # Increased timeout to 30 seconds for result retrieval to allow for table operations
+            query_job = None
+            try:
+                with ThreadPoolExecutor(max_workers=1) as executor:
+                    # Submit the query in a thread with timeout using the separate client
+                    future_query = executor.submit(logging_client.query, insert_query, job_config)
+                    query_job = future_query.result(timeout=5)  # 5 seconds to submit query
+                    
+                    # Wait for query result with timeout
+                    future_result = executor.submit(query_job.result, timeout=30)
+                    future_result.result(timeout=30)  # 30 seconds to get result
+            except (FuturesTimeoutError, Exception) as timeout_error:
+                # Try to cancel the query job to free up resources
+                if query_job:
+                    try:
+                        query_job.cancel()
+                        self.logger.info(f"Cancelled timed-out query job for alert '{alert.name}' (ID: {alert_id_int})")
+                    except Exception as cancel_error:
+                        self.logger.warning(f"Failed to cancel query job: {str(cancel_error)}")
+                
+                self.logger.warning(
+                    f"Execution logging query timed out for alert '{alert.name}' (ID: {alert_id_int}). "
+                    f"Logging failed. Error: {str(timeout_error)}"
+                )
+                return False  # Return False since logging failed
             
             self.logger.info(f"✅ Alert execution logged successfully for '{alert.name}' (ID: {alert_id_int})")
             return True
@@ -424,11 +572,6 @@ class AlertProcessor:
             else:
                 formatted_row[key] = serialized_value
 
-        # Truncate SQL if too long
-        sql_display = alert.sql
-        if len(sql_display) > 1000:
-            sql_display = sql_display[:1000] + "... (truncated)"
-
         # Add cooldown information for hourly alerts
         cooldown_text = ""
         if alert.resolution == 'H' and alert.max_hourly_alerts_per_day:
@@ -436,118 +579,122 @@ class AlertProcessor:
         else:
             cooldown_text = "*Max alerts per day:*\nUnlimited"
 
-        message = {
-            "blocks": [
-                {
-                    "type": "header",
-                    "text": {
-                        "type": "plain_text",
-                        "text": f"🚨 BigQuery Alert: {alert.name}",
-                        "emoji": True
-                    }
-                },
-                {
-                    "type": "section",
-                    "fields": [
-                        {
-                            "type": "mrkdwn",
-                            "text": f"*Description:*\n{alert.description}"
-                        }
-                    ]
-                },
-                {
-                    "type": "section",
-                    "fields": [
-                        {
-                            "type": "mrkdwn",
-                            "text": f"*Alert ID:*\n{alert.alert_id or 'N/A'}"
-                        },
-                        {
-                            "type": "mrkdwn",
-                            "text": f"*Owner:*\n{alert.owner or 'N/A'}"
-                        }
-                    ]
-                },
-                {
-                    "type": "section",
-                    "fields": [
-                        {
-                            "type": "mrkdwn",
-                            "text": f"*Resolution (D/H):*\n{alert.resolution}"
-                        },
-                        {
-                            "type": "mrkdwn",
-                            "text": cooldown_text
-                        }
-                    ]
-                },
-                {
-                    "type": "section",
-                    "text": {
-                        "type": "mrkdwn",
-                        "text": f"*SQL Query:*\n```{sql_display}```"
-                    }
-                },
-                {
-                    "type": "section",
-                    "fields": [
-                        {
-                            "type": "mrkdwn",
-                            "text": f"*Number of query returned rows:*\n{row_count}"
-                        },
-                        {
-                            "type": "mrkdwn",
-                            "text": f"*Threshold for alerting:*\n{alert.threshold_for_alerting or 'N/A'}"
-                        }
-                    ]
-                },
-                {
-                    "type": "section",
-                    "text": {
-                        "type": "mrkdwn",
-                        "text": f"*First query returned row:*\n```{json.dumps(formatted_row, indent=2)}```"
-                    }
-                },
-                {
-                    "type": "section",
-                    "fields": [
-                        {
-                            "type": "mrkdwn",
-                            "text": f"*Jira ID:*\n{alert.jira_id or 'N/A'}"
-                        }
-                    ]
-                },
-                {
-                    "type": "section",
-                    "fields": [
-                        {
-                            "type": "mrkdwn",
-                            "text": f"*Notion Doc:*\n{alert.notion_doc_link or 'N/A'}"
-                        }
-                    ]
-                },
-                {
-                    "type": "section",
-                    "fields": [
-                        {
-                            "type": "mrkdwn",
-                            "text": f"*Data Query Link:*\n{alert.data_query_link or 'N/A'}"
-                        }
-                    ]
-                },
-                {
-                    "type": "context",
-                    "elements": [
-                        {
-                            "type": "mrkdwn",
-                            "text": f"Alert generated at {datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC')}"
-                        }
-                    ]
-                },
-                {
-                    "type": "divider"
+        # Format header text based on test mode
+        if self.test_mode:
+            header_text = f"🧪 TEST: {alert.name}"
+        else:
+            header_text = f"🚨 {alert.name}"
+
+        # Build message blocks
+        blocks = [
+            {
+                "type": "header",
+                "text": {
+                    "type": "plain_text",
+                    "text": header_text,
+                    "emoji": True
                 }
-            ]
+            },
+            {
+                "type": "section",
+                "fields": [
+                    {
+                        "type": "mrkdwn",
+                        "text": f"*Description:*\n{alert.description}"
+                    }
+                ]
+            },
+            {
+                "type": "section",
+                "fields": [
+                    {
+                        "type": "mrkdwn",
+                        "text": f"*Alert ID:*\n{alert.alert_id or 'N/A'}"
+                    },
+                    {
+                        "type": "mrkdwn",
+                        "text": f"*Owner:*\n{alert.owner or 'N/A'}"
+                    }
+                ]
+            },
+            {
+                "type": "section",
+                "fields": [
+                    {
+                        "type": "mrkdwn",
+                        "text": f"*Resolution (D/H):*\n{alert.resolution}"
+                    },
+                    {
+                        "type": "mrkdwn",
+                        "text": cooldown_text
+                    }
+                ]
+            }
+        ]
+
+        # SQL Query section removed per user request
+
+        blocks.extend([
+            {
+                "type": "section",
+                "fields": [
+                    {
+                        "type": "mrkdwn",
+                        "text": f"*Number of query returned rows:*\n{row_count}"
+                    },
+                    {
+                        "type": "mrkdwn",
+                        "text": f"*Threshold for alerting:*\n{alert.threshold_for_alerting or 'N/A'}"
+                    }
+                ]
+            },
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f"*First query returned row:*\n```{json.dumps(formatted_row, indent=2)}```"
+                }
+            },
+            {
+                "type": "section",
+                "fields": [
+                    {
+                        "type": "mrkdwn",
+                        "text": f"*Jira ID:*\n{alert.jira_id or 'N/A'}"
+                    }
+                ]
+            },
+            {
+                "type": "section",
+                "fields": [
+                    {
+                        "type": "mrkdwn",
+                        "text": f"*Notion Doc:*\n{alert.notion_doc_link or 'N/A'}"
+                    }
+                ]
+            },
+            {
+                "type": "context",
+                "elements": [
+                    {
+                        "type": "mrkdwn",
+                        "text": f"Alert generated at {datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC')}"
+                    }
+                ]
+            },
+            {
+                "type": "divider"
+            }
+        ])
+
+        # Format message for mobile notifications
+        # text: Used as notification preview (shows only alert title and channel)
+        # username: Empty string removes sender name from notification
+        mobile_notification_text = f"{alert.name} - {alert.slack_alert_channel}"
+        message = {
+            "text": mobile_notification_text,  # Notification preview - shows only alert title and channel
+            "username": "",  # Remove sender name from mobile notification
+            "blocks": blocks
         }
         return message
 
@@ -599,9 +746,96 @@ class AlertProcessor:
             elif alert.resolution == 'H' and not alert.alert_id:
                 self.logger.warning(f"Hourly alert '{alert.name}' has no alert_id - cooldown mechanism disabled")
             
-            query_job = self.client.query(alert.sql)
-            results = query_job.result()
-            rows = list(results)
+            # Add timeout to prevent hanging queries for main alert execution
+            # Use ThreadPoolExecutor to ensure timeout is enforced even if BigQuery client hangs
+            # Wrap both query submission and result waiting in timeout
+            # Reduced timeouts to catch before Gunicorn worker timeout (~30s)
+            query_job = None
+            try:
+                with ThreadPoolExecutor(max_workers=1) as executor:
+                    # Submit the query in a thread with timeout
+                    future_query = executor.submit(self.client.query, alert.sql)
+                    query_job = future_query.result(timeout=10)  # 10 seconds to submit query
+                    
+                    # Wait for query result with timeout
+                    future_result = executor.submit(query_job.result, timeout=20)
+                    results = future_result.result(timeout=20)  # 20 seconds to get result
+            except (FuturesTimeoutError, Exception) as timeout_error:
+                # Try to cancel the query job to free up resources
+                if query_job:
+                    try:
+                        query_job.cancel()
+                        self.logger.info(f"Cancelled timed-out alert query job for alert '{alert.name}' (ID: {alert.alert_id or 'N/A'})")
+                    except Exception as cancel_error:
+                        self.logger.warning(f"Failed to cancel alert query job: {str(cancel_error)}")
+                
+                self.logger.error(
+                    f"Alert query timed out for alert '{alert.name}' (ID: {alert.alert_id or 'N/A'}). "
+                    f"Alert execution failed. Error: {str(timeout_error)}"
+                )
+                
+                # Log the execution as failed
+                logging_success = self.log_alert_execution(
+                    alert, 
+                    alert_generated=False, 
+                    row_count=0,
+                    threshold=alert.threshold_for_alerting or 1,
+                    success=False,
+                    error_message=f"Query timeout: {str(timeout_error)}"
+                )
+                
+                return {
+                    'success': False,
+                    'row_count': 0,
+                    'threshold': alert.threshold_for_alerting or 1,
+                    'alert_generated': False,
+                    'error': f"Query timeout: {str(timeout_error)}",
+                    'timestamp': datetime.now().isoformat(),
+                    'slack_channel': alert.slack_alert_channel,
+                    'logging_success': logging_success
+                }
+            
+            # Wrap result iteration in timeout as well - iteration can trigger additional API calls
+            try:
+                with ThreadPoolExecutor(max_workers=1) as executor:
+                    # Convert results to list with timeout (this forces all pages to be fetched)
+                    future_list = executor.submit(lambda: list(results))
+                    rows = future_list.result(timeout=30)  # 30 seconds to iterate/fetch all pages
+            except (FuturesTimeoutError, Exception) as iteration_timeout:
+                # Try to cancel the query job to free up resources
+                if query_job:
+                    try:
+                        query_job.cancel()
+                        self.logger.info(f"Cancelled timed-out alert query job after iteration timeout for alert '{alert.name}' (ID: {alert.alert_id or 'N/A'})")
+                    except Exception as cancel_error:
+                        self.logger.warning(f"Failed to cancel alert query job: {str(cancel_error)}")
+                
+                self.logger.error(
+                    f"Alert query result iteration timed out for alert '{alert.name}' (ID: {alert.alert_id or 'N/A'}). "
+                    f"Alert execution failed. Error: {str(iteration_timeout)}"
+                )
+                
+                # Log the execution as failed
+                logging_success = self.log_alert_execution(
+                    alert, 
+                    alert_generated=False, 
+                    row_count=0,
+                    threshold=alert.threshold_for_alerting or 1,
+                    success=False,
+                    error_message=f"Result iteration timeout: {str(iteration_timeout)}"
+                )
+                
+                return {
+                    'success': False,
+                    'row_count': 0,
+                    'threshold': alert.threshold_for_alerting or 1,
+                    'alert_generated': False,
+                    'error': f"Result iteration timeout: {str(iteration_timeout)}",
+                    'timestamp': datetime.now().isoformat(),
+                    'slack_channel': alert.slack_alert_channel,
+                    'logging_success': logging_success
+                }
+            
             row_count = len(rows)
             
             # Define newline characters outside the f-string
@@ -768,7 +1002,8 @@ def run_alerts(request):
     try:
         # Get resolution from query parameters if specified
         resolution = request.args.get('resolution')
-        processor = AlertProcessor(resolution)
+        # Test mode is disabled for Cloud Run (production only)
+        processor = AlertProcessor(resolution, test_mode=False)
         results = processor.process_all_alerts()
         logger.info("Alert Processor Cloud Run Function completed successfully")
         
@@ -787,15 +1022,81 @@ def run_alerts(request):
             'timestamp': datetime.now().isoformat()
         }), 500  # HTTP 500 status code for internal server error
 
+# Expose Flask app for Cloud Run/gunicorn
+# Create Flask app and wrap the functions_framework handler
+app = Flask(__name__)
+
+@app.route('/', methods=['GET', 'POST'])
+@app.route('/<path:path>', methods=['GET', 'POST'])
+def handle_request(path=''):
+    """Cloud Run entry point that wraps the functions_framework handler."""
+    try:
+        # Create a request-like object compatible with functions_framework
+        class CloudRunRequest:
+            def __init__(self, flask_req):
+                self.method = flask_req.method
+                self.path = flask_req.path
+                self.args = flask_req.args
+                self.json = flask_req.get_json(silent=True)
+                self.headers = flask_req.headers
+                self.data = flask_req.get_data()
+        
+        # Call the original function
+        result = run_alerts(CloudRunRequest(flask_request))
+        
+        # Return the result (it's already a Flask response from jsonify)
+        return result
+        
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        logger = logging.getLogger('BigQueryAlerts')
+        logger.error(f"Error handling request: {str(e)}")
+        return jsonify({
+            'success': False,
+            'error': str(e),
+            'timestamp': datetime.now().isoformat()
+        }), 500
+
 if __name__ == "__main__":
     """
     Local execution entry point.
     This will be used when running the script directly on your laptop.
+    
+    Usage:
+        python main.py [H|D] [--test|--test-mode]
+        
+    Examples:
+        python main.py              # Run all alerts in production mode
+        python main.py H           # Run hourly alerts in production mode
+        python main.py --test      # Run all alerts in test mode (uses stage tables)
+        python main.py H --test    # Run hourly alerts in test mode
     """
     try:
-        # Get resolution from command line arguments if specified
-        resolution = sys.argv[1] if len(sys.argv) > 1 else None
-        processor = AlertProcessor(resolution) 
+        # Parse command line arguments
+        resolution = None
+        test_mode = False
+        
+        for arg in sys.argv[1:]:
+            if arg in ['H', 'D']:
+                resolution = arg
+            elif arg in ['--test', '--test-mode']:
+                test_mode = True
+        
+        # Check environment variable for test mode
+        if not test_mode:
+            test_mode = is_test_mode()
+        
+        if test_mode:
+            print("🧪 TEST MODE: Using stage tables")
+            print("   - Settings table: yotam-395120.peerplay.bigquery_alerts_to_slack_settings_stage")
+            print("   - History table: yotam-395120.peerplay.bigquery_alerts_execution_history_stage")
+        else:
+            print("🚀 PRODUCTION MODE: Using production tables")
+            print("   - Settings table: yotam-395120.peerplay.bigquery_alerts_to_slack_settings")
+            print("   - History table: yotam-395120.peerplay.bigquery_alerts_execution_history")
+        
+        processor = AlertProcessor(resolution, test_mode=test_mode) 
         results = processor.process_all_alerts()
         processor.logger.info("Program completed successfully")
         print(json.dumps(results, indent=2))
