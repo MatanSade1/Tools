@@ -15,20 +15,26 @@ from param_analysis.param_analyzer import ParameterAnalyzer
 class ComparativeValidator:
     """Validator that compares new data against rules from old data."""
     
-    def __init__(self, old_csv_path: str, new_csv_path: str, chunk_size: int = 10000, exclude_parameters: list = None):
+    def __init__(self, old_csv_path: str, new_csv_path: str, chunk_size: int = 10000, exclude_parameters: list = None, include_parameters: list = None):
         self.old_csv_path = Path(old_csv_path)
         self.new_csv_path = Path(new_csv_path)
         self.chunk_size = chunk_size
         self.exclude_parameters = set(exclude_parameters) if exclude_parameters else set()
+        self.include_parameters = set(include_parameters) if include_parameters else None
         self.analyzer = ParameterAnalyzer(old_csv_path)
         
-        # Debug logging for exclusions
+        # Debug logging for exclusions and inclusions
         if self.exclude_parameters:
             print(f"ComparativeValidator initialized with {len(self.exclude_parameters)} excluded parameters:")
             for param in sorted(self.exclude_parameters):
                 print(f"  - {param}")
         else:
             print("ComparativeValidator initialized with NO excluded parameters")
+        
+        if self.include_parameters:
+            print(f"ComparativeValidator initialized with {len(self.include_parameters)} included parameters (only these will be validated):")
+            for param in sorted(self.include_parameters):
+                print(f"  - {param}")
         
         # Validation rules and value sets from old data
         self.auto_rules = {}  # Column -> rules mapping
@@ -38,15 +44,30 @@ class ComparativeValidator:
         # Results storage
         self.results = {}
         
-        # Create logs directory
+        # Create logs directory structure
         self.logs_dir = Path('logs')
         self.logs_dir.mkdir(exist_ok=True)
         
+        # Create subdirectories for different log types
+        self.validation_logs_dir = self.logs_dir / 'comparative_validation'
+        self.summary_logs_dir = self.logs_dir / 'comparative_summary'
+        self.summary_main_logs_dir = self.logs_dir / 'comparative_summary_main'
+        self.old_analysis_logs_dir = self.logs_dir / 'old_data_analysis'
+        
+        # Create subdirectories if they don't exist
+        self.validation_logs_dir.mkdir(exist_ok=True)
+        self.summary_logs_dir.mkdir(exist_ok=True)
+        self.summary_main_logs_dir.mkdir(exist_ok=True)
+        self.old_analysis_logs_dir.mkdir(exist_ok=True)
+        
         # Create timestamped filenames
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        self.validation_log = self.logs_dir / f'comparative_validation_{timestamp}.log'
-        self.validation_summary = self.logs_dir / f'comparative_summary_{timestamp}.json'
-        self.validation_summary_main = self.logs_dir / f'comparative_summary_main_{timestamp}.json'
+        self.validation_log = self.validation_logs_dir / f'comparative_validation_{timestamp}.log'
+        self.validation_summary = self.summary_logs_dir / f'comparative_summary_{timestamp}.json'
+        self.validation_summary_main = self.summary_main_logs_dir / f'comparative_summary_main_{timestamp}.json'
+        
+        # Load known issues (Jira tickets) mapping
+        self.known_issues = self.load_known_issues()
     
     def analyze_old_data(self):
         """Analyze old CSV to extract rules and valid value sets."""
@@ -61,6 +82,10 @@ class ComparativeValidator:
             # Strong exclusion check with debug logging
             if column in self.exclude_parameters:
                 print(f"EXCLUDED: Skipping parameter '{column}' (in exclusion list)")
+                continue
+            # If include_parameters is set, only analyze those parameters
+            if self.include_parameters is not None and column not in self.include_parameters:
+                print(f"SKIPPED: Skipping parameter '{column}' (not in include list)")
                 continue
                 
             print(f"Initializing analysis for column: {column}")
@@ -88,6 +113,9 @@ class ComparativeValidator:
             for column in chunk.columns:
                 # Strong exclusion check during value set building
                 if column in self.exclude_parameters:
+                    continue
+                # If include_parameters is set, only analyze those parameters
+                if self.include_parameters is not None and column not in self.include_parameters:
                     continue
                 if column in self.column_types and self.column_types[column] == 'value_set':
                     # Add values to set, converting to strings for consistency
@@ -221,6 +249,9 @@ class ComparativeValidator:
                     # Strong exclusion check during validation
                     if column in self.exclude_parameters:
                         continue
+                    # If include_parameters is set, only validate those parameters
+                    if self.include_parameters is not None and column not in self.include_parameters:
+                        continue
                     if column not in self.column_types:
                         print(f"Warning: New column found: {column}")
                         continue
@@ -254,7 +285,7 @@ class ComparativeValidator:
     def save_analysis_results(self):
         """Save the analysis results from the old CSV."""
         analysis_timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        analysis_file = self.logs_dir / f'old_data_analysis_{analysis_timestamp}.json'
+        analysis_file = self.old_analysis_logs_dir / f'old_data_analysis_{analysis_timestamp}.json'
         
         analysis_results = {
             'column_types': self.column_types,
@@ -267,6 +298,45 @@ class ComparativeValidator:
             json.dump(analysis_results, f, indent=2)
         
         print(f"\nAnalysis results saved to: {analysis_file}")
+    
+    def get_validator_details(self, column: str) -> Dict[str, Any]:
+        """Get detailed information about the validator used for a column."""
+        details = {}
+        
+        # Check if column has an enhanced validator
+        if column in VALIDATORS:
+            validator = VALIDATORS[column]
+            validator_class_name = validator.__class__.__name__
+            details['validator_class'] = validator_class_name
+            
+            # If it's a RangeValidator, extract min and max values
+            if validator_class_name == 'RangeValidator':
+                details['min_value'] = validator.min_value
+                details['max_value'] = validator.max_value
+                details['allow_null'] = validator.allow_null
+        elif column in self.auto_rules:
+            # For rule-based validation, check if it has range information
+            rules = self.auto_rules[column]
+            if 'min_value' in rules and 'max_value' in rules:
+                details['validator_class'] = 'RangeValidator (rules)'
+                details['min_value'] = rules['min_value']
+                details['max_value'] = rules['max_value']
+        
+        return details
+    
+    def load_known_issues(self) -> dict:
+        """Load known issues (Jira tickets) mapping from JSON file."""
+        known_issues_path = Path('known_issues.json')
+        if known_issues_path.exists():
+            try:
+                with open(known_issues_path, 'r') as f:
+                    return json.load(f)
+            except Exception as e:
+                print(f"Warning: Failed to load known_issues.json: {e}")
+                return {}
+        else:
+            print("Info: known_issues.json not found, no Jira tickets will be included")
+            return {}
     
     def save_validation_results(self):
         """Save the validation results."""
@@ -293,6 +363,9 @@ class ComparativeValidator:
                 print(f"Skipping excluded parameter in results: {column}")
                 continue
                 
+            # Get validator details
+            validator_details = self.get_validator_details(column)
+            
             result_data = {
                 'total_tested': result['total_tested'],
                 'valid_count': result['valid_count'],
@@ -301,6 +374,22 @@ class ComparativeValidator:
                 'invalid_examples': result['invalid_examples'] if result['invalid_examples'] else None,
                 'error_messages': list(result['error_messages']) if result['error_messages'] else None
             }
+            
+            # Add validator details if available
+            if validator_details:
+                result_data['validator_class'] = validator_details.get('validator_class')
+                if 'min_value' in validator_details:
+                    result_data['min_value'] = validator_details['min_value']
+                if 'max_value' in validator_details:
+                    result_data['max_value'] = validator_details['max_value']
+                if 'allow_null' in validator_details:
+                    result_data['allow_null'] = validator_details['allow_null']
+            
+            # Add Jira ticket link if available
+            if column in self.known_issues:
+                result_data['jira_ticket'] = self.known_issues[column]
+            else:
+                result_data['jira_ticket'] = "No Jira ticket"
             
             # Add to full results
             final_results[column] = result_data
@@ -313,9 +402,18 @@ class ComparativeValidator:
         with open(self.validation_summary, 'w') as f:
             json.dump(final_results, f, indent=2)
         
-        # Save filtered main summary to JSON
+        # Save filtered main summary to JSON with header
+        main_summary_with_header = {
+            'header': {
+                'total_parameters_with_errors': len(main_results),
+                'generation_timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                'total_rows_tested': sum(r['total_tested'] for r in main_results.values()) if main_results else 0
+            },
+            'parameters': main_results
+        }
+        
         with open(self.validation_summary_main, 'w') as f:
-            json.dump(main_results, f, indent=2)
+            json.dump(main_summary_with_header, f, indent=2)
         
         print("\nValidation complete! Results saved to:")
         print(f"- Log file: {self.validation_log}")

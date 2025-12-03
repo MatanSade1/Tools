@@ -50,7 +50,32 @@ class ValidationRunner:
                 "chunk_size": 10000,
                 "output_dir": "data",
                 "logs_dir": "logs",
-                "exclude_parameters": []
+                "exclude_parameters": [
+                    "res_timestamp",
+                    "time",
+                    "timestamp_client",
+                    "timestamp_source",
+                    "mp_mp_api_timestamp_ms",
+                    "mp_processing_time_ms",
+                    "distinct_id",
+                    "user_id",
+                    "device_id",
+                    "gaid",
+                    "mp_distinct_id_before_identity",
+                    "entity_id",
+                    "exception_message",
+                    "res_constraint",
+                    "error_messages",
+                    "updated_keys",
+                    "realm_file_size",
+                    "error_message",
+                    "inner_exception_name",
+                    "exception",
+                    "files_count",
+                    "race_request_board_level",
+                    "race_request_board_cycle",
+                    "failure_description_message"
+                ]
             },
             "analysis": {
                 "unique_ratio_threshold": 0.01,
@@ -112,7 +137,7 @@ class ValidationRunner:
             logging.error(f"Data extraction failed: {e}")
             return False
     
-    def run_validation(self, exclude_parameters: list = None) -> bool:
+    def run_validation(self, exclude_parameters: list = None, include_parameters: list = None) -> bool:
         """Run validation comparison."""
         try:
             from compare_validate import ComparativeValidator
@@ -130,7 +155,8 @@ class ValidationRunner:
                 str(old_csv),
                 str(new_csv),
                 chunk_size=self.config["validation"]["chunk_size"],
-                exclude_parameters=exclude_parameters
+                exclude_parameters=exclude_parameters,
+                include_parameters=include_parameters
             )
             
             # Run validation
@@ -248,12 +274,20 @@ class ValidationRunner:
             )
             client = bigquery.Client(credentials=credentials, project='yotam-395120')
             
+            # Try to convert version to float, if it fails, use it as string
+            try:
+                version_float = float(version)
+                version_filter = f"version_float = {version_float}"
+            except ValueError:
+                # If version can't be converted to float, use string comparison
+                version_filter = f"CAST(version_float AS STRING) = '{version}'"
+            
             # Query to check if parameter has any non-null values
             query = f"""
             SELECT DISTINCT {parameter}
             FROM `yotam-395120.peerplay.vmp_master_event_normalized`
             WHERE date BETWEEN '{start_date}' AND '{end_date}'
-              AND version_float = {version}
+              AND {version_filter}
               AND {parameter} IS NOT NULL
             LIMIT 1
             """
@@ -595,12 +629,17 @@ def main():
     parser.add_argument(
         '--sample-size',
         type=int,
-        help='Number of rows to sample per version (default: 50,000)'
+        help='Number of rows to sample per version (default: 10,000)'
     )
     parser.add_argument(
         '--exclude-parameters',
         nargs='+',
         help='List of parameters to exclude from validation (e.g., --exclude-parameters timestamp distinct_id)'
+    )
+    parser.add_argument(
+        '--include-parameters',
+        nargs='+',
+        help='List of parameters to include in validation (only these will be validated, e.g., --include-parameters param1 param2)'
     )
     parser.add_argument(
         '--skip-parameter-changes',
@@ -644,7 +683,12 @@ def main():
         else:
             logging.info("No parameters will be excluded from validation")
         
-        success = runner.run_validation(exclude_parameters=all_exclusions)
+        # Get include parameters if specified
+        include_params = args.include_parameters if args.include_parameters else None
+        if include_params:
+            logging.info(f"Including only {len(include_params)} parameters: {', '.join(sorted(include_params))}")
+        
+        success = runner.run_validation(exclude_parameters=all_exclusions, include_parameters=include_params)
         if not success:
             return 1
     

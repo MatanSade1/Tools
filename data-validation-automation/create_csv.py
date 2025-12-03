@@ -17,14 +17,22 @@ project_id = 'yotam-395120'
 dataset_id = 'peerplay'
 table_id = 'vmp_master_event_normalized'
 service_account_path = 'yotam-395120-0c59ae7bb76e.json'
-TARGET_SAMPLE_SIZE = 20000  # Target 20K rows per version (optimized for performance)
+TARGET_SAMPLE_SIZE = 10000  # Target 10K rows per version (default sample size)
 
 def get_version_row_count(client: bigquery.Client, version: str, start_date: str, end_date: str) -> int:
     """Get the total number of rows for a specific version within the date range."""
+    # Try to convert version to float, if it fails, use it as string
+    try:
+        version_float = float(version)
+        version_filter = f"version_float = {version_float}"
+    except ValueError:
+        # If version can't be converted to float, use string comparison
+        version_filter = f"CAST(version_float AS STRING) = '{version}'"
+    
     query = f"""
     SELECT COUNT(*) as count
     FROM `{project_id}.{dataset_id}.{table_id}`
-    WHERE version_float = {version}
+    WHERE {version_filter}
       AND date BETWEEN '{start_date}' AND '{end_date}'
     """
     
@@ -33,6 +41,8 @@ def get_version_row_count(client: bigquery.Client, version: str, start_date: str
 
 def calculate_sampling_denominator(total_rows: int, target_rows: int) -> int:
     """Calculate the sampling denominator to get approximately target_rows."""
+    if total_rows == 0 or target_rows == 0:
+        return 1  # Return 1 to avoid division by zero
     return math.ceil(total_rows / target_rows)
 
 def extract_data_from_bigquery(old_version: str, new_version: str, start_date: str, end_date: str, sample_size: int = None, preserve_purchase_events: bool = False) -> pd.DataFrame:
@@ -65,6 +75,21 @@ def extract_data_from_bigquery(old_version: str, new_version: str, start_date: s
     print(f"- Version {old_version}: {old_count:,} rows")
     print(f"- Version {new_version}: {new_count:,} rows")
     
+    # Check if we have any data
+    if old_count == 0 and new_count == 0:
+        raise ValueError(
+            f"No data found for versions {old_version} and {new_version} "
+            f"in date range {start_date} to {end_date}. "
+            f"Please verify:\n"
+            f"1. The version numbers are correct (they may be stored as 0.37250 instead of 0.37.250)\n"
+            f"2. The date range contains data for these versions\n"
+            f"3. The versions exist in the database"
+        )
+    elif old_count == 0:
+        raise ValueError(f"No data found for old version {old_version} in date range {start_date} to {end_date}")
+    elif new_count == 0:
+        raise ValueError(f"No data found for new version {new_version} in date range {start_date} to {end_date}")
+    
     # Calculate sampling denominators
     old_denominator = calculate_sampling_denominator(old_count, target_sample_size)
     new_denominator = calculate_sampling_denominator(new_count, target_sample_size)
@@ -74,6 +99,18 @@ def extract_data_from_bigquery(old_version: str, new_version: str, start_date: s
     print(f"- New version ({new_version}): sampling ~1/{new_denominator} of data")
     
     date_filter = f" AND date BETWEEN '{start_date}' AND '{end_date}'"
+    
+    # Helper function to create version filter
+    def get_version_filter(version: str) -> str:
+        try:
+            version_float = float(version)
+            return f"version_float = {version_float}"
+        except ValueError:
+            # If version can't be converted to float, use string comparison
+            return f"CAST(version_float AS STRING) = '{version}'"
+    
+    old_version_filter = get_version_filter(old_version)
+    new_version_filter = get_version_filter(new_version)
     
     if preserve_purchase_events:
         print(f"\n🛒 PRESERVE PURCHASE EVENTS MODE ENABLED")
@@ -86,14 +123,14 @@ def extract_data_from_bigquery(old_version: str, new_version: str, start_date: s
         WITH OldVersionPurchases AS (
             SELECT *, '{old_version}' as source_version, 'purchase' as sample_type
             FROM `{project_id}.{dataset_id}.{table_id}`
-            WHERE version_float = {old_version}
+            WHERE {old_version_filter}
               AND mp_event_name = 'purchase_successful'
               {date_filter}
         ),
         OldVersionOtherSample AS (
             SELECT *, '{old_version}' as source_version, 'sampled' as sample_type
             FROM `{project_id}.{dataset_id}.{table_id}`
-            WHERE version_float = {old_version}
+            WHERE {old_version_filter}
               AND mp_event_name != 'purchase_successful'
               AND MOD(ABS(FARM_FINGERPRINT(CAST(res_timestamp AS STRING))), {old_denominator}) = 0
               {date_filter}
@@ -102,14 +139,14 @@ def extract_data_from_bigquery(old_version: str, new_version: str, start_date: s
         NewVersionPurchases AS (
             SELECT *, '{new_version}' as source_version, 'purchase' as sample_type
             FROM `{project_id}.{dataset_id}.{table_id}`
-            WHERE version_float = {new_version}
+            WHERE {new_version_filter}
               AND mp_event_name = 'purchase_successful'
               {date_filter}
         ),
         NewVersionOtherSample AS (
             SELECT *, '{new_version}' as source_version, 'sampled' as sample_type
             FROM `{project_id}.{dataset_id}.{table_id}`
-            WHERE version_float = {new_version}
+            WHERE {new_version_filter}
               AND mp_event_name != 'purchase_successful'
               AND MOD(ABS(FARM_FINGERPRINT(CAST(res_timestamp AS STRING))), {new_denominator}) = 0
               {date_filter}
@@ -129,7 +166,7 @@ def extract_data_from_bigquery(old_version: str, new_version: str, start_date: s
         WITH OldVersionSample AS (
             SELECT *, '{old_version}' as source_version, 'sampled' as sample_type
             FROM `{project_id}.{dataset_id}.{table_id}`
-            WHERE version_float = {old_version}
+            WHERE {old_version_filter}
               AND MOD(ABS(FARM_FINGERPRINT(CAST(res_timestamp AS STRING))), {old_denominator}) = 0
               {date_filter}
             LIMIT {target_sample_size}
@@ -137,7 +174,7 @@ def extract_data_from_bigquery(old_version: str, new_version: str, start_date: s
         NewVersionSample AS (
             SELECT *, '{new_version}' as source_version, 'sampled' as sample_type
             FROM `{project_id}.{dataset_id}.{table_id}`
-            WHERE version_float = {new_version}
+            WHERE {new_version_filter}
               AND MOD(ABS(FARM_FINGERPRINT(CAST(res_timestamp AS STRING))), {new_denominator}) = 0
               {date_filter}
             LIMIT {target_sample_size}
@@ -176,8 +213,16 @@ def extract_data_from_bigquery(old_version: str, new_version: str, start_date: s
     
     # Count versions efficiently (avoid creating multiple filtered DataFrames)
     version_counts = df['version_float'].value_counts()
-    old_count = version_counts.get(float(old_version), 0)
-    new_count = version_counts.get(float(new_version), 0)
+    # Try to convert versions to float for comparison, otherwise use string matching
+    try:
+        old_version_float = float(old_version)
+        new_version_float = float(new_version)
+        old_count = version_counts.get(old_version_float, 0)
+        new_count = version_counts.get(new_version_float, 0)
+    except ValueError:
+        # If versions can't be converted to float, match by string
+        old_count = len(df[df['version_float'].astype(str) == old_version])
+        new_count = len(df[df['version_float'].astype(str) == new_version])
     
     print(f"- Old version ({old_version}): {old_count:,} rows")
     print(f"- New version ({new_version}): {new_count:,} rows")
@@ -185,8 +230,15 @@ def extract_data_from_bigquery(old_version: str, new_version: str, start_date: s
     # Show purchase event statistics if preserve mode was enabled
     if preserve_purchase_events and 'sample_type' in df.columns:
         purchase_counts = df[df['sample_type'] == 'purchase']['version_float'].value_counts()
-        old_purchases = purchase_counts.get(float(old_version), 0)
-        new_purchases = purchase_counts.get(float(new_version), 0)
+        try:
+            old_version_float = float(old_version)
+            new_version_float = float(new_version)
+            old_purchases = purchase_counts.get(old_version_float, 0)
+            new_purchases = purchase_counts.get(new_version_float, 0)
+        except ValueError:
+            purchase_df = df[df['sample_type'] == 'purchase']
+            old_purchases = len(purchase_df[purchase_df['version_float'].astype(str) == old_version])
+            new_purchases = len(purchase_df[purchase_df['version_float'].astype(str) == new_version])
         total_purchases = old_purchases + new_purchases
         
         print(f"\n🛒 Purchase Events Preserved:")
@@ -234,7 +286,11 @@ def split_and_save_versions(df: pd.DataFrame, old_version: str, new_version: str
     
     # Split and save old version
     print(f"Filtering data for old version ({old_version})...")
-    old_df = df[df['version_float'] == float(old_version)]
+    try:
+        old_version_float = float(old_version)
+        old_df = df[df['version_float'] == old_version_float]
+    except ValueError:
+        old_df = df[df['version_float'].astype(str) == old_version]
     old_file = output_dir / 'game_data_old.csv'
     print(f"\nSaving old version ({old_version}):")
     print(f"- {len(old_df):,} rows")
@@ -246,7 +302,11 @@ def split_and_save_versions(df: pd.DataFrame, old_version: str, new_version: str
     
     # Split and save new version
     print(f"Filtering data for new version ({new_version})...")
-    new_df = df[df['version_float'] == float(new_version)]
+    try:
+        new_version_float = float(new_version)
+        new_df = df[df['version_float'] == new_version_float]
+    except ValueError:
+        new_df = df[df['version_float'].astype(str) == new_version]
     new_file = output_dir / 'game_data_new.csv'
     print(f"\nSaving new version ({new_version}):")
     print(f"- {len(new_df):,} rows")

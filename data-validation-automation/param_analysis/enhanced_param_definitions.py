@@ -393,11 +393,38 @@ class CountryCodeValidator(ParameterValidator):
 
 class FixedSetValidator(ParameterValidator):
     """Validator for values that must be in a specific set of allowed values."""
-    def __init__(self, allowed_values: List[str]):
+    def __init__(self, allowed_values: List[str], allow_null: bool = False):
         self.allowed_values = set(allowed_values)
+        self.allow_null = allow_null
     
     def validate(self, value: Any) -> bool:
         try:
+            # Handle null values
+            if value is None or (isinstance(value, str) and value.strip().lower() in ['null', 'none', '']):
+                return self.allow_null
+            
+            # Convert boolean values to string (handles True/False from CSV)
+            if isinstance(value, bool):
+                # Check both capitalized and lowercase versions to handle 'True'/'False' and 'true'/'false'
+                bool_str_lower = str(value).lower()
+                bool_str_capitalized = str(value)  # Python bool converts to 'True'/'False'
+                # Check if either version is in allowed values
+                if bool_str_lower in self.allowed_values or bool_str_capitalized in self.allowed_values:
+                    return True
+                return False
+            # Convert numeric values to string (handles float/int from CSV)
+            elif isinstance(value, float):
+                # If float represents a whole number (e.g., 0.0, 1.0), try both int and float string representations
+                if value.is_integer():
+                    int_str = str(int(value))
+                    float_str = str(value)
+                    # Check both representations to handle cases where allowed_values has "399.0" but value is 399.0
+                    return int_str in self.allowed_values or float_str in self.allowed_values
+                else:
+                    value = str(value)
+            elif isinstance(value, int):
+                value = str(value)
+            
             if not isinstance(value, str):
                 return False
             
@@ -628,6 +655,62 @@ class PackRaritiesWeightsValidator(ParameterValidator):
         except:
             return False
 
+class AndroidOsVersionValidator(ParameterValidator):
+    """Validator for Android OS version strings that start with 'Android OS ' or match X.Y.Z or X.Y format or specific version strings."""
+    def __init__(self):
+        # Specific allowed version strings
+        self.allowed_versions = {"26.1", "26.2", "18.7.2", "18.6.2", "18.5", "26.0.1", "18.4.1", "15.7.1"}
+        # Pattern for X.Y.Z format where X, Y, Z are numbers
+        self.version_pattern_xyz = re.compile(r'^\d+\.\d+\.\d+$')
+        # Pattern for X.Y format where X, Y are numbers
+        self.version_pattern_xy = re.compile(r'^\d+\.\d+$')
+    
+    def validate(self, value: Any) -> bool:
+        try:
+            if not isinstance(value, str):
+                return False
+            value = value.strip()
+            # Check if it's a specific allowed version
+            if value in self.allowed_versions:
+                return True
+            # Check if it matches X.Y.Z format (where X, Y, Z are numbers)
+            if self.version_pattern_xyz.match(value):
+                return True
+            # Check if it matches X.Y format (where X, Y are numbers)
+            if self.version_pattern_xy.match(value):
+                return True
+            # Check if it starts with "Android OS "
+            return value.startswith("Android OS ")
+        except:
+            return False
+
+class HexadecimalValidator(ParameterValidator):
+    """Validator for hexadecimal strings of 4-10 characters."""
+    def validate(self, value: Any) -> bool:
+        try:
+            if not isinstance(value, str):
+                return False
+            value = value.strip()
+            # Check length (4-10 chars) and hexadecimal pattern
+            if not (4 <= len(value) <= 10):
+                return False
+            return bool(re.match(r'^[0-9a-fA-F]+$', value))
+        except:
+            return False
+
+class DecimalTimestampValidator(ParameterValidator):
+    """Validator for timestamps with decimal precision (e.g., 1764473446766.58)."""
+    def validate(self, value: Any) -> bool:
+        try:
+            if not isinstance(value, (int, float, str)):
+                return False
+            # Convert to float and check if it's a reasonable timestamp in milliseconds
+            float_val = float(value)
+            # Should be a reasonable timestamp in milliseconds (2020-2030)
+            return 1577836800000 <= float_val <= 1893456000000
+        except (ValueError, TypeError):
+            return False
+
 class UuidValidator(ParameterValidator):
     """Validator for UUID format strings."""
     def validate(self, value: Any) -> bool:
@@ -646,9 +729,16 @@ VALIDATORS = {
     # ISO format timestamps (with timezone required)
     'time': IsoTimestampValidator(require_timezone=True),
     'eoc_end_time': FormatValidator(pattern=r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$'),
-    'flowers_end_time': IsoTimestampValidator(require_timezone=True),
+    'flowers_end_time': FormatValidator(pattern=r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$'),
     'recipes_end_time': IsoTimestampValidator(require_timezone=True),
     'purchase_date': FormatValidator(pattern=r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$'),
+    'mp_date_partition': IsoTimestampValidator(require_timezone=True),
+    
+    # OS version validation
+    'mp_os_version': AndroidOsVersionValidator(),
+    
+    # Hexadecimal ID validation (4-10 chars)
+    'mp_insert_id': HexadecimalValidator(),
     
     # ISO format timestamps (YYYY-MM-DDTHH:MM:SS format without timezone)
     'timed_board_task_end_time': FormatValidator(pattern=r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$'),
@@ -659,9 +749,9 @@ VALIDATORS = {
     'mp_processing_time_ms': UnixTimestampMillisValidator(),
     'server_timestamp_numeric': UnixTimestampMillisValidator(),
     
-    # Unix timestamp (seconds)
-    'updated_timestamp': UnixTimestampSecondsValidator(),
-    'original_timestamp': UnixTimestampSecondsValidator(),
+    # Unix timestamp (seconds) - with decimal precision support
+    'updated_timestamp': DecimalTimestampValidator(),
+    'original_timestamp': DecimalTimestampValidator(),
     
     # List fields with updated allowed values and any-value lists
     'live_ops_segment_id': ListValidator(allow_any=True),
@@ -680,9 +770,11 @@ VALIDATORS = {
     'eoc_points_balance': RangeValidator(min_value=0, allow_mean=False),
     'credit_balance': RangeValidator(allow_mean=False),
     'ui_credit_balance': RangeValidator(allow_mean=False),
-    'item_quantity_1': RangeValidator(min_value=0),
-    'item_quantity_2': RangeValidator(min_value=0),
-    'item_quantity_3': RangeValidator(min_value=0),
+    'item_quantity_1': RangeValidator(min_value=0, max_value=100000),
+    'item_quantity_2': RangeValidator(min_value=0, max_value=100000),
+    'item_quantity_3': RangeValidator(min_value=0, max_value=100000),
+    'item_quantity_4': RangeValidator(min_value=0, max_value=100000),
+    'item_quantity_5': RangeValidator(min_value=0, max_value=100000),
     'semi_locked_tiles': RangeValidator(min_value=0, max_value=22),
     'goal_currency_quantity_1': RangeValidator(),
     'goal_currency_quantity_2': RangeValidator(),
@@ -711,8 +803,8 @@ VALIDATORS = {
     # Recipes event ID validation (1-200, no null)
     'recipes_event_id': RangeValidator(min_value=1, max_value=200, allow_null=False),
     
-    # FTUE description validation (descriptive text pattern including semicolons)
-    'ftue_description': FormatValidator(pattern=r"^[A-Za-z0-9\s,\.'\-;]+$"),
+    # FTUE description validation (descriptive text pattern including semicolons, plus signs, and commas)
+    'ftue_description': FormatValidator(pattern=r"^[A-Za-z0-9\s,\.'\-;+]+$"),
     
     # Price original string validation (international price formats with various currencies)
     'price_original_string': FormatValidator(pattern=r"^[^\r\n]*[\d\u0660-\u0669\u06F0-\u06F9]+[^\r\n]*$"),
@@ -761,7 +853,7 @@ VALIDATORS = {
     
     # Scapes task ID validation (1-2000, no null)
     'scapes_task_id': RangeValidator(min_value=1, max_value=2000, allow_null=False),
-    'scape_task_id': RangeValidator(min_value=1, max_value=2000, allow_null=False),
+    'scape_task_id': RangeValidator(min_value=1, max_value=543, allow_null=False),
     
     # Screen dimensions validation (200-5000, no null)
     'mp_screen_width': RangeValidator(min_value=200, max_value=5000, allow_null=False),
@@ -770,13 +862,19 @@ VALIDATORS = {
     # Screen DPI validation (50-1000, no null)
     'mp_screen_dpi': RangeValidator(min_value=50, max_value=1000, allow_null=False),
     
-    # City name validation (allows letters, spaces, apostrophes, hyphens, and accented characters)
-    'mp_city': FormatValidator(pattern=r"^[A-Za-z\u00C0-\u017F\u0100-\u024F\s'\-\.]+$"),
+    # City name validation (allows letters, spaces, apostrophes (regular and curly), hyphens, commas, parentheses, forward slashes, and accented characters)
+    # Includes specific patterns: "Tracadie–Sheila", "Burgdorf, Hanover", "L'Aquila", "'Aiea", "Rotenburg (Wümme)", "Al 'Arīsh", "Dällikon / Dällikon (Dorf)"
+    'mp_city': FormatValidator(pattern=r"^[A-Za-z\u00C0-\u017F\u0100-\u024F\u1E00-\u1EFF\u2013\u2018\u2019\s'\-\.(),/]+$"),
     
-    # Region name validation (allows letters, spaces, apostrophes, hyphens, and accented characters)
-    'mp_region': FormatValidator(pattern=r"^[A-Za-z\u00C0-\u017F\u0100-\u024F\s'\-\.,]+$"),
+    # Model name validation (allows letters, numbers, spaces, parentheses, commas, forward slashes, plus signs, and various characters)
+    # Includes patterns like "motorola moto g stylus (XT2115DL)", "INFINIX MOBILITY LIMITED Infinix X682B", "iPhone17,4", "samsung SM-G980F/DS", "Wingtech Celero5G+", "Wingtech REVVL V+ 5G", "Tinno Celero3 5G+"
+    'mp_model': FormatValidator(pattern=r"^[A-Za-z0-9\s()\-_.,/+]+$"),
     
-    # Country code validation (ISO 3166-1 alpha-2 codes - all 249 country codes)
+    # Region name validation (allows letters, spaces, apostrophes, hyphens, forward slashes, and accented characters)
+    # Includes specific patterns: "Baladiyat ad Dawhah", "Đồng Nai Province"
+    'mp_region': FormatValidator(pattern=r"^[A-Za-z\u00C0-\u017F\u0100-\u024F\u1E00-\u1EFF\s'\-\.,/]+$"),
+    
+    # Country code validation (ISO 3166-1 alpha-2 codes - all 249 country codes + XK)
     'mp_country_code': FixedSetValidator(allowed_values=[
         'AD', 'AE', 'AF', 'AG', 'AI', 'AL', 'AM', 'AO', 'AQ', 'AR',
         'AS', 'AT', 'AU', 'AW', 'AX', 'AZ', 'BA', 'BB', 'BD', 'BE',
@@ -802,7 +900,7 @@ VALIDATORS = {
         'SX', 'SY', 'SZ', 'TC', 'TD', 'TF', 'TG', 'TH', 'TJ', 'TK',
         'TL', 'TM', 'TN', 'TO', 'TR', 'TT', 'TV', 'TW', 'TZ', 'UA',
         'UG', 'UM', 'US', 'UY', 'UZ', 'VA', 'VC', 'VE', 'VG', 'VI',
-        'VN', 'VU', 'WF', 'WS', 'YE', 'YT', 'ZA', 'ZM', 'ZW'
+        'VN', 'VU', 'WF', 'WS', 'XE', 'XK', 'YE', 'YT', 'ZA', 'ZM', 'ZW'
     ]),
     
     # Locked tiles validation (0-64, no null)
@@ -875,11 +973,492 @@ VALIDATORS = {
     # Item name validation (pattern-based to allow any reasonable item name including Packs_rarity format)
     'item_name': FormatValidator(pattern=r"^[A-Za-z0-9\s'\-&\.\(\)_]+$"),
     
-    # Item ID 1 name validation (pattern-based to allow any reasonable item name including Packs_rarity format)
-    'item_id_1_name': FormatValidator(pattern=r"^[A-Za-z0-9\s'\-&\.\(\)_]+$"),
-    
-    # Item ID 2 name validation (pattern-based to allow any reasonable item name including Packs_rarity format)
-    'item_id_2_name': FormatValidator(pattern=r"^[A-Za-z0-9\s'\-&\.\(\)_]+$"),
+    # Item ID name validation (FixedSetValidator with specific allowed values)
+    'item_id_1_name': FixedSetValidator(allowed_values=[
+        'item_id_name', 'Action Slate', 'Ticket', 'Beach-Tini', 'Fresh Cocoa Beans', 'Blue One-Piece',
+        'Rainbow Shades', 'Single Scoop', 'Tea Leaf', 'Big Paper Cup', 'Milk Cooler', 'Cheese Cube',
+        'Greeting Card', 'Message in Bottle', 'Pink Cup Of Tea With Sugar', 'Glass Tea Pot', 'Low Pumps',
+        'Boombox', 'Pocket Player', 'Simple Pin', 'Triple Scoop', 'Packs_rarity_Five', 'Burger Meal',
+        'Burger Feast', 'Bee Comb', 'Pancakes a la Mode', 'Milk', 'Packs_rarity_Two', 'Golden Tea Set',
+        'Spin Toy', 'Headphones', 'Flaming Ring', 'Main Stage', 'Mixing Bowl', 'Crown', "Mermaids Shell",
+        'Gold Stilettos', 'Herbal Tea', 'Shoe Box', 'Squeaky Duck', 'Knitted Scarf', 'Poodle Pup',
+        'Gladiator Sandals', 'Pink Bikini', 'Basic Swimsuit Set', 'Ingredient Bowl', 'Empty Teapot',
+        'Colorful Kaftan', 'White Wedges', 'Flower Clip', 'Ring', 'Canned Food', 'Festive Maracas',
+        'Steaming Teapot', 'Large Chest', 'Fancy Beef', 'Chocolate Chip', "Master's Coat", 'Choco-Chip Cookie',
+        'Chew Rope', 'Double Scoop', 'cash', 'Bread Oven', 'Island Tea', 'Ice Cream Cake', 'Sliced Bread',
+        'Small Mixer', 'Bow Platforms', 'Grocery Crate', 'Resort Slides', 'Unicorn Cake', 'Comb',
+        'Cup Of Tea With Plant', 'Toy Box', 'Cocoa Powder', 'Tea Apparatus', 'Deluxe Wellington',
+        'Box of Truffles', 'Golden Pumps', 'Coco-Colada', 'Island Punch', 'Banana Split', 'Barbell Rack', 'Hoagie',
+        'Magic Stone', 'Triple Golden Cake', 'Blue Long-Sleeve Set', 'Sunny Heels', 'Purple Stilettos',
+        'Rottie Pup', 'Chocolate Truffle', 'Dolphin Photo', 'Paper Flower', 'Newspaper', 'Royal Tea Set',
+        'Gold Shinny Dress', 'Bread Flour', 'Glass of Red', 'Retro Yellows', 'White Kaftan', 'Plated Cup of Tea',
+        'Waffles a la Mode', 'Sundae', 'Tea Plant', 'Entry Ticket', 'Flamingo Shades', 'Tea Pot Generator',
+        'Bowl Of Tea', 'Ice Cream Bucket', 'Underwater Camera', 'Hot Dog', 'Paper Cup', 'Luxury Gold Shades',
+        'Movie Recorder', 'Rainbow Heels', 'Trick Hat', 'Green Cup Of Tea', 'Empty Tea Pot', 'Round Bed',
+        'Red Velvet Cake', 'Truffle Duo', 'Star Target', 'Cheddar Wedge', 'Golden Fascinator', 'Frosty Brew',
+        'Credits', 'Green Clip', "Mermaids Tears", 'Deluxe Rainbow Shades', 'Emerald Tea Set', 'Ruby Tea Set',
+        'Cinema Reel', 'Beach Bag', 'Clownfish Photo', 'Medium Fridge', 'Fried Chicken Bucket', 'Empty Glass',
+        'Designer Slides', 'Toast and Jam', 'Bread Dough', "Collectors' DVD", 'Purple Tee', 'Tea Time',
+        'Mermaid Trident', 'Hair Treasure', 'Simple Collar', 'Empty Bowl', 'Color Balls', 'Circus Tent',
+        'Packs_rarity_Three', 'Elegant Bow', 'Berry Brain Freeze', 'Blue Boardshorts', 'Short Shorts',
+        'Club Sandwich', 'Cream', 'Yellow Fancy One-Piece', 'Soft Serve', 'Drinks Crate', 'Tea Bowl',
+        'Classic Popcorn', 'Unbaked Bread', 'Pineapple Shades', 'Tea Bag', 'Leaf Cluster', 'Album Pack 2',
+        'Tea Infuser', 'Walking Set', 'Digital Pet', 'Mobile Phone', 'Leopard Loafers', 'Mix Tape',
+        'Rock Guitar', 'Gold Trumpet', 'Pink Shades', 'Watermelon Cocktail', 'Woven Heels', 'Fancy Tea Time',
+        'Deluxe Dog', 'Red Stilettos', 'Wedding Cake', 'Punch Bowl', 'Pearl', 'Tea & Treats', 'Ball Rope',
+        'Blue Tang Photo', 'VIP Carpet', 'Tambourine', 'Moorish Idol Photo', 'Juice', 'Glass Teapot',
+        'Lemonade Stand', 'Ear Buds', 'Fluffy Pup', 'Full Bowl', '100 Credits', 'Food Bag', 'Wired Headset',
+        'Fresh Mozzarella', 'credits', 'Album Pack 1', 'White Dress', 'Digital Camera', 'Pool Slides',
+        'Stage Mic', 'Cup Of Tea With Cookie', 'Tablet', 'Packs_rarity_Four', 'Fancy Clasp', 'Yellow Long-Sleeve',
+        'Triple Triple Hamburger', 'Unmixed Dough', 'Heart Shades', 'Rolling Pin', 'Red Slingbacks',
+        'Prime Tomahawk', 'Bookmark', 'White Sandals', 'Corgi Pup', 'Swiss Slices', 'Pitcher of Punch',
+        'Burger', 'One Rose', "Mermaids Scale", 'Shaped Loaves', 'Punch Fountain', 'Bow Pumps',
+        'Crystal Star Shades', 'Luxury Bed', 'Meal Set', 'Cruise Magazine', 'PB&J', 'Golden Award',
+        'Sport Tank', 'Knot Slides', 'Mermaid Star', 'Deluxe Sundae', 'Big Bone', 'Golden Pup',
+        'Gourmet Meal', 'Smart Watch', 'Dried Cacao Beans', 'Magazine', 'Diamond Heels', 'Show Cannon',
+        'Laptop', 'Lava Lamp', 'Purple Fancy Set', 'Beach Flops', 'Summer Spritzer', 'Buckle Sandals',
+        'Spiced Tea', 'Square Bed', 'Large Mixer', 'Dog House', 'Cup Of Tea', 'Sporty Pink One-Piece',
+        'Tea Date', "Director's Seat", 'Mirror', 'Credit', 'Shepherd Pup', 'Small Chest',
+        'Strawberry', 'Strawberry Shake', 'Gym Basics', 'Packs_rarity_One', 'VR Headset',
+        'Golden Champagne Tower', 'Gym Station', 'Jump Rope', 'item_id_name', 'credits', 'cash',
+        'Yellow Long-Sleeve', 'Yellow Fancy One-Piece', 'Woven Heels', 'Wired Headset', 'White Wedges',
+        'White Sandals', 'White Kaftan', 'White Dress', 'Wedding Cake', 'Watermelon Cocktail',
+        'Walking Set', 'Waffles a la Mode', 'VIP Carpet', 'Unmixed Dough', 'Unicorn Cake',
+        'Underwater Camera', 'Unbaked Bread', 'Truffle Duo', 'Triple Triple Hamburger', 'Triple Scoop',
+        'Triple Golden Cake', 'Trick Hat', 'Toy Box', 'Toast and Jam', 'Ticket', 'Tea Time',
+        'Tea Pot Generator', 'Tea Plant', 'Tea Leaf', 'Tea Infuser', 'Tea Date', 'Tea Bowl',
+        'Tea Bag', 'Tea Apparatus', 'Tea & Treats', 'Tambourine', 'Tablet', 'Swiss Slices',
+        'Sunny Heels', 'Sundae', 'Summer Spritzer', 'Steaming Teapot', 'Star Target', 'Stage Mic',
+        'Squeaky Duck', 'Square Bed', 'Sporty Pink One-Piece', 'Sport Tank', 'Spin Toy', 'Spiced Tea',
+        'Soft Serve', 'Smart Watch', 'Small Mixer', 'Small Chest', 'Sliced Bread', 'Single Scoop',
+        'Simple Pin', 'Simple Collar', 'Show Cannon', 'Short Shorts', 'Shoe Box', 'Shepherd Pup',
+        'Shaped Loaves', 'Ruby Tea Set', 'Royal Tea Set', 'Round Bed', 'Rottie Pup', 'Rolling Pin',
+        'Rock Guitar', 'Ring', 'Retro Yellows', 'Resort Slides', 'Red Velvet Cake', 'Red Stilettos',
+        'Red Slingbacks', 'Rainbow Shades', 'Rainbow Heels', 'Purple Tee', 'Purple Stilettos',
+        'Purple Fancy Set', 'Punch Fountain', 'Punch Bowl', 'Prime Tomahawk', 'Pool Slides',
+        'Poodle Pup', 'Pocket Player', 'Platform Flops', 'Plated Cup of Tea', 'Pitcher of Punch',
+        'Pink Shades', 'Pink Cup Of Tea With Sugar', 'Pink Bikini', 'Pineapple Shades', 'Pearl',
+        'Paper Flower', 'Paper Cup', 'Pancakes a la Mode', 'Packs_rarity_Two', 'Packs_rarity_Three',
+        'Packs_rarity_Four', 'Packs_rarity_Five', 'PB&J', 'One Rose', 'Newspaper', 'Movie Recorder',
+        'Moorish Idol Photo', 'Mobile Phone', 'Mixing Bowl', 'Mix Tape', 'Mirror', 'Milk Cooler',
+        'Milk', 'Message in Bottle', "Mermaids Tears", "Mermaids Shell", "Mermaids Scale",
+        'Mermaid Trident', 'Mermaid Star', 'Medium Fridge', 'Meal Set', "Master's Coat", 'Main Stage',
+        'Magic Stone', 'Magazine', 'Luxury Gold Shades', 'Luxury Bed', 'Low Pumps', 'Leopard Loafers',
+        'Lemonade Stand', 'Leaf Cluster', 'Lava Lamp', 'Large Mixer', 'Large Chest', 'Laptop',
+        'Knot Slides', 'Knitted Scarf', 'Juice', 'Island Tea', 'Island Punch', 'Ingredient Bowl',
+        'Ice Cream Cake', 'Ice Cream Bucket', 'Hot Dog', 'Hoagie', 'Herbal Tea', 'Heart Shades',
+        'Headphones', 'Hair Treasure', 'Grocery Crate', 'Greeting Card', 'Green Cup Of Tea',
+        'Green Clip', 'Gourmet Meal', 'Golden Tea Set', 'Golden Pup', 'Golden Pumps',
+        'Golden Fascinator', 'Golden Award', 'Gold Trumpet', 'Gold Stilettos', 'Gold Shinny Dress',
+        'Glass of Red', 'Glass Teapot', 'Glass Tea Pot', 'Gladiator Sandals', 'Full Bowl',
+        'Frosty Brew', 'Fried Chicken Bucket', 'Fresh Mozzarella', 'Fresh Cocoa Beans', 'Food Bag',
+        'Fluffy Pup', 'Flower Clip', 'Flamingo Shades', 'Flaming Ring', 'Festive Maracas',
+        'Fancy Tea Time', 'Fancy Clasp', 'Fancy Beef', 'Entry Ticket', 'Empty Teapot',
+        'Empty Tea Pot', 'Empty Glass', 'Empty Bowl', 'Emerald Tea Set', 'Elegant Bow',
+        'Ear Buds', 'Drinks Crate', 'Dried Cacao Beans', 'Double Scoop', 'Dolphin Photo',
+        'Dog House', "Director's Seat", 'Digital Pet', 'Digital Camera', 'Diamond Heels',
+        'Designer Slides', 'Deluxe Wellington', 'Deluxe Sundae', 'Deluxe Rainbow Shades',
+        'Deluxe Dog', 'Cup Of Tea With Plant', 'Cup Of Tea With Cookie', 'Cup Of Tea',
+        'Crystal Star Shades', 'Cruise Magazine', 'Crown', 'Credits', 'Credit', 'Cream',
+        'Corgi Pup', 'Comb', 'Colorful Kaftan', 'Color Balls', "Collectors' DVD",
+        'Cocoa Powder', 'Coco-Colada', 'Club Sandwich', 'Clownfish Photo', 'Classic Popcorn',
+        'Circus Tent', 'Cinema Reel', 'Chocolate Truffle', 'Chocolate Chip', 'Choco-Chip Cookie',
+        'Chew Rope', 'Cheese Cube', 'Cheddar Wedge', 'Canned Food', 'Burger Meal', 'Burger Feast',
+        'Burger', 'Buckle Sandals', 'Bread Oven', 'Bread Flour', 'Bread Dough', 'Box of Truffles',
+        'Bowl Of Tea', 'Bow Pumps', 'Bow Platforms', 'Boombox', 'Bookmark', 'Blue Tang Photo',
+        'Blue One-Piece', 'Blue Long-Sleeve Set', 'Blue Boardshorts', 'Big Paper Cup', 'Big Bone',
+        'Berry Brain Freeze', 'Bee Comb', 'Beach-Tini', 'Beach Flops', 'Beach Bag',
+        'Basic Swimsuit Set', 'Banana Split', 'Ball Rope', 'Album Pack 2', 'Album Pack 1',
+        'Action Slate', '100 Credits'
+    ]),
+    'item_id_2_name': FixedSetValidator(allowed_values=[
+        'item_id_name', 'Action Slate', 'Ticket', 'Beach-Tini', 'Fresh Cocoa Beans', 'Blue One-Piece',
+        'Rainbow Shades', 'Single Scoop', 'Tea Leaf', 'Big Paper Cup', 'Milk Cooler', 'Cheese Cube',
+        'Greeting Card', 'Message in Bottle', 'Pink Cup Of Tea With Sugar', 'Glass Tea Pot', 'Low Pumps',
+        'Boombox', 'Pocket Player', 'Simple Pin', 'Triple Scoop', 'Packs_rarity_Five', 'Burger Meal',
+        'Burger Feast', 'Bee Comb', 'Pancakes a la Mode', 'Milk', 'Packs_rarity_Two', 'Golden Tea Set',
+        'Spin Toy', 'Headphones', 'Flaming Ring', 'Main Stage', 'Mixing Bowl', 'Crown', "Mermaids Shell",
+        'Gold Stilettos', 'Herbal Tea', 'Shoe Box', 'Squeaky Duck', 'Knitted Scarf', 'Poodle Pup',
+        'Gladiator Sandals', 'Pink Bikini', 'Basic Swimsuit Set', 'Ingredient Bowl', 'Empty Teapot',
+        'Colorful Kaftan', 'White Wedges', 'Flower Clip', 'Ring', 'Canned Food', 'Festive Maracas',
+        'Steaming Teapot', 'Large Chest', 'Fancy Beef', 'Chocolate Chip', "Master's Coat", 'Choco-Chip Cookie',
+        'Chew Rope', 'Double Scoop', 'cash', 'Bread Oven', 'Island Tea', 'Ice Cream Cake', 'Sliced Bread',
+        'Small Mixer', 'Bow Platforms', 'Grocery Crate', 'Resort Slides', 'Unicorn Cake', 'Comb',
+        'Cup Of Tea With Plant', 'Toy Box', 'Cocoa Powder', 'Tea Apparatus', 'Deluxe Wellington',
+        'Box of Truffles', 'Golden Pumps', 'Coco-Colada', 'Island Punch', 'Banana Split', 'Barbell Rack', 'Hoagie',
+        'Magic Stone', 'Triple Golden Cake', 'Blue Long-Sleeve Set', 'Sunny Heels', 'Purple Stilettos',
+        'Rottie Pup', 'Chocolate Truffle', 'Dolphin Photo', 'Paper Flower', 'Newspaper', 'Royal Tea Set',
+        'Gold Shinny Dress', 'Bread Flour', 'Glass of Red', 'Retro Yellows', 'White Kaftan', 'Plated Cup of Tea',
+        'Waffles a la Mode', 'Sundae', 'Tea Plant', 'Entry Ticket', 'Flamingo Shades', 'Tea Pot Generator',
+        'Bowl Of Tea', 'Ice Cream Bucket', 'Underwater Camera', 'Hot Dog', 'Paper Cup', 'Luxury Gold Shades',
+        'Movie Recorder', 'Rainbow Heels', 'Trick Hat', 'Green Cup Of Tea', 'Empty Tea Pot', 'Round Bed',
+        'Red Velvet Cake', 'Truffle Duo', 'Star Target', 'Cheddar Wedge', 'Golden Fascinator', 'Frosty Brew',
+        'Credits', 'Green Clip', "Mermaids Tears", 'Deluxe Rainbow Shades', 'Emerald Tea Set', 'Ruby Tea Set',
+        'Cinema Reel', 'Beach Bag', 'Clownfish Photo', 'Medium Fridge', 'Fried Chicken Bucket', 'Empty Glass',
+        'Designer Slides', 'Toast and Jam', 'Bread Dough', "Collectors' DVD", 'Purple Tee', 'Tea Time',
+        'Mermaid Trident', 'Hair Treasure', 'Simple Collar', 'Empty Bowl', 'Color Balls', 'Circus Tent',
+        'Packs_rarity_Three', 'Elegant Bow', 'Berry Brain Freeze', 'Blue Boardshorts', 'Short Shorts',
+        'Club Sandwich', 'Cream', 'Yellow Fancy One-Piece', 'Soft Serve', 'Drinks Crate', 'Tea Bowl',
+        'Classic Popcorn', 'Unbaked Bread', 'Pineapple Shades', 'Tea Bag', 'Leaf Cluster', 'Album Pack 2',
+        'Tea Infuser', 'Walking Set', 'Digital Pet', 'Mobile Phone', 'Leopard Loafers', 'Mix Tape',
+        'Rock Guitar', 'Gold Trumpet', 'Pink Shades', 'Watermelon Cocktail', 'Woven Heels', 'Fancy Tea Time',
+        'Deluxe Dog', 'Red Stilettos', 'Wedding Cake', 'Punch Bowl', 'Pearl', 'Tea & Treats', 'Ball Rope',
+        'Blue Tang Photo', 'VIP Carpet', 'Tambourine', 'Moorish Idol Photo', 'Juice', 'Glass Teapot',
+        'Lemonade Stand', 'Ear Buds', 'Fluffy Pup', 'Full Bowl', '100 Credits', 'Food Bag', 'Wired Headset',
+        'Fresh Mozzarella', 'credits', 'Album Pack 1', 'White Dress', 'Digital Camera', 'Pool Slides',
+        'Stage Mic', 'Cup Of Tea With Cookie', 'Tablet', 'Packs_rarity_Four', 'Fancy Clasp', 'Yellow Long-Sleeve',
+        'Triple Triple Hamburger', 'Unmixed Dough', 'Heart Shades', 'Rolling Pin', 'Red Slingbacks',
+        'Prime Tomahawk', 'Bookmark', 'White Sandals', 'Corgi Pup', 'Swiss Slices', 'Pitcher of Punch',
+        'Burger', 'One Rose', "Mermaids Scale", 'Shaped Loaves', 'Punch Fountain', 'Bow Pumps',
+        'Crystal Star Shades', 'Luxury Bed', 'Meal Set', 'Cruise Magazine', 'PB&J', 'Golden Award',
+        'Sport Tank', 'Knot Slides', 'Mermaid Star', 'Deluxe Sundae', 'Big Bone', 'Golden Pup',
+        'Gourmet Meal', 'Smart Watch', 'Dried Cacao Beans', 'Magazine', 'Diamond Heels', 'Show Cannon',
+        'Laptop', 'Lava Lamp', 'Purple Fancy Set', 'Beach Flops', 'Summer Spritzer', 'Buckle Sandals',
+        'Spiced Tea', 'Square Bed', 'Large Mixer', 'Dog House', 'Cup Of Tea', 'Sporty Pink One-Piece',
+        'Tea Date', "Director's Seat", 'Mirror', 'Credit', 'Shepherd Pup', 'Small Chest',
+        'Strawberry', 'Strawberry Shake', 'Gym Basics', 'Packs_rarity_One', 'VR Headset',
+        'Golden Champagne Tower', 'Gym Station', 'Jump Rope', 'item_id_name', 'credits', 'cash',
+        'Yellow Long-Sleeve', 'Yellow Fancy One-Piece', 'Woven Heels', 'Wired Headset', 'White Wedges',
+        'White Sandals', 'White Kaftan', 'White Dress', 'Wedding Cake', 'Watermelon Cocktail',
+        'Walking Set', 'Waffles a la Mode', 'VIP Carpet', 'Unmixed Dough', 'Unicorn Cake',
+        'Underwater Camera', 'Unbaked Bread', 'Truffle Duo', 'Triple Triple Hamburger', 'Triple Scoop',
+        'Triple Golden Cake', 'Trick Hat', 'Toy Box', 'Toast and Jam', 'Ticket', 'Tea Time',
+        'Tea Pot Generator', 'Tea Plant', 'Tea Leaf', 'Tea Infuser', 'Tea Date', 'Tea Bowl',
+        'Tea Bag', 'Tea Apparatus', 'Tea & Treats', 'Tambourine', 'Tablet', 'Swiss Slices',
+        'Sunny Heels', 'Sundae', 'Summer Spritzer', 'Steaming Teapot', 'Star Target', 'Stage Mic',
+        'Squeaky Duck', 'Square Bed', 'Sporty Pink One-Piece', 'Sport Tank', 'Spin Toy', 'Spiced Tea',
+        'Soft Serve', 'Smart Watch', 'Small Mixer', 'Small Chest', 'Sliced Bread', 'Single Scoop',
+        'Simple Pin', 'Simple Collar', 'Show Cannon', 'Short Shorts', 'Shoe Box', 'Shepherd Pup',
+        'Shaped Loaves', 'Ruby Tea Set', 'Royal Tea Set', 'Round Bed', 'Rottie Pup', 'Rolling Pin',
+        'Rock Guitar', 'Ring', 'Retro Yellows', 'Resort Slides', 'Red Velvet Cake', 'Red Stilettos',
+        'Red Slingbacks', 'Rainbow Shades', 'Rainbow Heels', 'Purple Tee', 'Purple Stilettos',
+        'Purple Fancy Set', 'Punch Fountain', 'Punch Bowl', 'Prime Tomahawk', 'Pool Slides',
+        'Poodle Pup', 'Pocket Player', 'Platform Flops', 'Plated Cup of Tea', 'Pitcher of Punch',
+        'Pink Shades', 'Pink Cup Of Tea With Sugar', 'Pink Bikini', 'Pineapple Shades', 'Pearl',
+        'Paper Flower', 'Paper Cup', 'Pancakes a la Mode', 'Packs_rarity_Two', 'Packs_rarity_Three',
+        'Packs_rarity_Four', 'Packs_rarity_Five', 'PB&J', 'One Rose', 'Newspaper', 'Movie Recorder',
+        'Moorish Idol Photo', 'Mobile Phone', 'Mixing Bowl', 'Mix Tape', 'Mirror', 'Milk Cooler',
+        'Milk', 'Message in Bottle', "Mermaids Tears", "Mermaids Shell", "Mermaids Scale",
+        'Mermaid Trident', 'Mermaid Star', 'Medium Fridge', 'Meal Set', "Master's Coat", 'Main Stage',
+        'Magic Stone', 'Magazine', 'Luxury Gold Shades', 'Luxury Bed', 'Low Pumps', 'Leopard Loafers',
+        'Lemonade Stand', 'Leaf Cluster', 'Lava Lamp', 'Large Mixer', 'Large Chest', 'Laptop',
+        'Knot Slides', 'Knitted Scarf', 'Juice', 'Island Tea', 'Island Punch', 'Ingredient Bowl',
+        'Ice Cream Cake', 'Ice Cream Bucket', 'Hot Dog', 'Hoagie', 'Herbal Tea', 'Heart Shades',
+        'Headphones', 'Hair Treasure', 'Grocery Crate', 'Greeting Card', 'Green Cup Of Tea',
+        'Green Clip', 'Gourmet Meal', 'Golden Tea Set', 'Golden Pup', 'Golden Pumps',
+        'Golden Fascinator', 'Golden Award', 'Gold Trumpet', 'Gold Stilettos', 'Gold Shinny Dress',
+        'Glass of Red', 'Glass Teapot', 'Glass Tea Pot', 'Gladiator Sandals', 'Full Bowl',
+        'Frosty Brew', 'Fried Chicken Bucket', 'Fresh Mozzarella', 'Fresh Cocoa Beans', 'Food Bag',
+        'Fluffy Pup', 'Flower Clip', 'Flamingo Shades', 'Flaming Ring', 'Festive Maracas',
+        'Fancy Tea Time', 'Fancy Clasp', 'Fancy Beef', 'Entry Ticket', 'Empty Teapot',
+        'Empty Tea Pot', 'Empty Glass', 'Empty Bowl', 'Emerald Tea Set', 'Elegant Bow',
+        'Ear Buds', 'Drinks Crate', 'Dried Cacao Beans', 'Double Scoop', 'Dolphin Photo',
+        'Dog House', "Director's Seat", 'Digital Pet', 'Digital Camera', 'Diamond Heels',
+        'Designer Slides', 'Deluxe Wellington', 'Deluxe Sundae', 'Deluxe Rainbow Shades',
+        'Deluxe Dog', 'Cup Of Tea With Plant', 'Cup Of Tea With Cookie', 'Cup Of Tea',
+        'Crystal Star Shades', 'Cruise Magazine', 'Crown', 'Credits', 'Credit', 'Cream',
+        'Corgi Pup', 'Comb', 'Colorful Kaftan', 'Color Balls', "Collectors' DVD",
+        'Cocoa Powder', 'Coco-Colada', 'Club Sandwich', 'Clownfish Photo', 'Classic Popcorn',
+        'Circus Tent', 'Cinema Reel', 'Chocolate Truffle', 'Chocolate Chip', 'Choco-Chip Cookie',
+        'Chew Rope', 'Cheese Cube', 'Cheddar Wedge', 'Canned Food', 'Burger Meal', 'Burger Feast',
+        'Burger', 'Buckle Sandals', 'Bread Oven', 'Bread Flour', 'Bread Dough', 'Box of Truffles',
+        'Bowl Of Tea', 'Bow Pumps', 'Bow Platforms', 'Boombox', 'Bookmark', 'Blue Tang Photo',
+        'Blue One-Piece', 'Blue Long-Sleeve Set', 'Blue Boardshorts', 'Big Paper Cup', 'Big Bone',
+        'Berry Brain Freeze', 'Bee Comb', 'Beach-Tini', 'Beach Flops', 'Beach Bag',
+        'Basic Swimsuit Set', 'Banana Split', 'Ball Rope', 'Album Pack 2', 'Album Pack 1',
+        'Action Slate', '100 Credits'
+    ]),
+    'item_id_3_name': FixedSetValidator(allowed_values=[
+        'item_id_name', 'Action Slate', 'Ticket', 'Beach-Tini', 'Fresh Cocoa Beans', 'Blue One-Piece',
+        'Rainbow Shades', 'Single Scoop', 'Tea Leaf', 'Big Paper Cup', 'Milk Cooler', 'Cheese Cube',
+        'Greeting Card', 'Message in Bottle', 'Pink Cup Of Tea With Sugar', 'Glass Tea Pot', 'Low Pumps',
+        'Boombox', 'Pocket Player', 'Simple Pin', 'Triple Scoop', 'Packs_rarity_Five', 'Burger Meal',
+        'Burger Feast', 'Bee Comb', 'Pancakes a la Mode', 'Milk', 'Packs_rarity_Two', 'Golden Tea Set',
+        'Spin Toy', 'Headphones', 'Flaming Ring', 'Main Stage', 'Mixing Bowl', 'Crown', "Mermaids Shell",
+        'Gold Stilettos', 'Herbal Tea', 'Shoe Box', 'Squeaky Duck', 'Knitted Scarf', 'Poodle Pup',
+        'Gladiator Sandals', 'Pink Bikini', 'Basic Swimsuit Set', 'Ingredient Bowl', 'Empty Teapot',
+        'Colorful Kaftan', 'White Wedges', 'Flower Clip', 'Ring', 'Canned Food', 'Festive Maracas',
+        'Steaming Teapot', 'Large Chest', 'Fancy Beef', 'Chocolate Chip', "Master's Coat", 'Choco-Chip Cookie',
+        'Chew Rope', 'Double Scoop', 'cash', 'Bread Oven', 'Island Tea', 'Ice Cream Cake', 'Sliced Bread',
+        'Small Mixer', 'Bow Platforms', 'Grocery Crate', 'Resort Slides', 'Unicorn Cake', 'Comb',
+        'Cup Of Tea With Plant', 'Toy Box', 'Cocoa Powder', 'Tea Apparatus', 'Deluxe Wellington',
+        'Box of Truffles', 'Golden Pumps', 'Coco-Colada', 'Island Punch', 'Banana Split', 'Barbell Rack', 'Hoagie',
+        'Magic Stone', 'Triple Golden Cake', 'Blue Long-Sleeve Set', 'Sunny Heels', 'Purple Stilettos',
+        'Rottie Pup', 'Chocolate Truffle', 'Dolphin Photo', 'Paper Flower', 'Newspaper', 'Royal Tea Set',
+        'Gold Shinny Dress', 'Bread Flour', 'Glass of Red', 'Retro Yellows', 'White Kaftan', 'Plated Cup of Tea',
+        'Waffles a la Mode', 'Sundae', 'Tea Plant', 'Entry Ticket', 'Flamingo Shades', 'Tea Pot Generator',
+        'Bowl Of Tea', 'Ice Cream Bucket', 'Underwater Camera', 'Hot Dog', 'Paper Cup', 'Luxury Gold Shades',
+        'Movie Recorder', 'Rainbow Heels', 'Trick Hat', 'Green Cup Of Tea', 'Empty Tea Pot', 'Round Bed',
+        'Red Velvet Cake', 'Truffle Duo', 'Star Target', 'Cheddar Wedge', 'Golden Fascinator', 'Frosty Brew',
+        'Credits', 'Green Clip', "Mermaids Tears", 'Deluxe Rainbow Shades', 'Emerald Tea Set', 'Ruby Tea Set',
+        'Cinema Reel', 'Beach Bag', 'Clownfish Photo', 'Medium Fridge', 'Fried Chicken Bucket', 'Empty Glass',
+        'Designer Slides', 'Toast and Jam', 'Bread Dough', "Collectors' DVD", 'Purple Tee', 'Tea Time',
+        'Mermaid Trident', 'Hair Treasure', 'Simple Collar', 'Empty Bowl', 'Color Balls', 'Circus Tent',
+        'Packs_rarity_Three', 'Elegant Bow', 'Berry Brain Freeze', 'Blue Boardshorts', 'Short Shorts',
+        'Club Sandwich', 'Cream', 'Yellow Fancy One-Piece', 'Soft Serve', 'Drinks Crate', 'Tea Bowl',
+        'Classic Popcorn', 'Unbaked Bread', 'Pineapple Shades', 'Tea Bag', 'Leaf Cluster', 'Album Pack 2',
+        'Tea Infuser', 'Walking Set', 'Digital Pet', 'Mobile Phone', 'Leopard Loafers', 'Mix Tape',
+        'Rock Guitar', 'Gold Trumpet', 'Pink Shades', 'Watermelon Cocktail', 'Woven Heels', 'Fancy Tea Time',
+        'Deluxe Dog', 'Red Stilettos', 'Wedding Cake', 'Punch Bowl', 'Pearl', 'Tea & Treats', 'Ball Rope',
+        'Blue Tang Photo', 'VIP Carpet', 'Tambourine', 'Moorish Idol Photo', 'Juice', 'Glass Teapot',
+        'Lemonade Stand', 'Ear Buds', 'Fluffy Pup', 'Full Bowl', '100 Credits', 'Food Bag', 'Wired Headset',
+        'Fresh Mozzarella', 'credits', 'Album Pack 1', 'White Dress', 'Digital Camera', 'Pool Slides',
+        'Stage Mic', 'Cup Of Tea With Cookie', 'Tablet', 'Packs_rarity_Four', 'Fancy Clasp', 'Yellow Long-Sleeve',
+        'Triple Triple Hamburger', 'Unmixed Dough', 'Heart Shades', 'Rolling Pin', 'Red Slingbacks',
+        'Prime Tomahawk', 'Bookmark', 'White Sandals', 'Corgi Pup', 'Swiss Slices', 'Pitcher of Punch',
+        'Burger', 'One Rose', "Mermaids Scale", 'Shaped Loaves', 'Punch Fountain', 'Bow Pumps',
+        'Crystal Star Shades', 'Luxury Bed', 'Meal Set', 'Cruise Magazine', 'PB&J', 'Golden Award',
+        'Sport Tank', 'Knot Slides', 'Mermaid Star', 'Deluxe Sundae', 'Big Bone', 'Golden Pup',
+        'Gourmet Meal', 'Smart Watch', 'Dried Cacao Beans', 'Magazine', 'Diamond Heels', 'Show Cannon',
+        'Laptop', 'Lava Lamp', 'Purple Fancy Set', 'Beach Flops', 'Summer Spritzer', 'Buckle Sandals',
+        'Spiced Tea', 'Square Bed', 'Large Mixer', 'Dog House', 'Cup Of Tea', 'Sporty Pink One-Piece',
+        'Tea Date', "Director's Seat", 'Mirror', 'Credit', 'Shepherd Pup', 'Small Chest',
+        'Strawberry', 'Strawberry Shake', 'Gym Basics', 'Packs_rarity_One', 'VR Headset',
+        'Golden Champagne Tower', 'Gym Station', 'Jump Rope', 'item_id_name', 'credits', 'cash',
+        'Yellow Long-Sleeve', 'Yellow Fancy One-Piece', 'Woven Heels', 'Wired Headset', 'White Wedges',
+        'White Sandals', 'White Kaftan', 'White Dress', 'Wedding Cake', 'Watermelon Cocktail',
+        'Walking Set', 'Waffles a la Mode', 'VIP Carpet', 'Unmixed Dough', 'Unicorn Cake',
+        'Underwater Camera', 'Unbaked Bread', 'Truffle Duo', 'Triple Triple Hamburger', 'Triple Scoop',
+        'Triple Golden Cake', 'Trick Hat', 'Toy Box', 'Toast and Jam', 'Ticket', 'Tea Time',
+        'Tea Pot Generator', 'Tea Plant', 'Tea Leaf', 'Tea Infuser', 'Tea Date', 'Tea Bowl',
+        'Tea Bag', 'Tea Apparatus', 'Tea & Treats', 'Tambourine', 'Tablet', 'Swiss Slices',
+        'Sunny Heels', 'Sundae', 'Summer Spritzer', 'Steaming Teapot', 'Star Target', 'Stage Mic',
+        'Squeaky Duck', 'Square Bed', 'Sporty Pink One-Piece', 'Sport Tank', 'Spin Toy', 'Spiced Tea',
+        'Soft Serve', 'Smart Watch', 'Small Mixer', 'Small Chest', 'Sliced Bread', 'Single Scoop',
+        'Simple Pin', 'Simple Collar', 'Show Cannon', 'Short Shorts', 'Shoe Box', 'Shepherd Pup',
+        'Shaped Loaves', 'Ruby Tea Set', 'Royal Tea Set', 'Round Bed', 'Rottie Pup', 'Rolling Pin',
+        'Rock Guitar', 'Ring', 'Retro Yellows', 'Resort Slides', 'Red Velvet Cake', 'Red Stilettos',
+        'Red Slingbacks', 'Rainbow Shades', 'Rainbow Heels', 'Purple Tee', 'Purple Stilettos',
+        'Purple Fancy Set', 'Punch Fountain', 'Punch Bowl', 'Prime Tomahawk', 'Pool Slides',
+        'Poodle Pup', 'Pocket Player', 'Platform Flops', 'Plated Cup of Tea', 'Pitcher of Punch',
+        'Pink Shades', 'Pink Cup Of Tea With Sugar', 'Pink Bikini', 'Pineapple Shades', 'Pearl',
+        'Paper Flower', 'Paper Cup', 'Pancakes a la Mode', 'Packs_rarity_Two', 'Packs_rarity_Three',
+        'Packs_rarity_Four', 'Packs_rarity_Five', 'PB&J', 'One Rose', 'Newspaper', 'Movie Recorder',
+        'Moorish Idol Photo', 'Mobile Phone', 'Mixing Bowl', 'Mix Tape', 'Mirror', 'Milk Cooler',
+        'Milk', 'Message in Bottle', "Mermaids Tears", "Mermaids Shell", "Mermaids Scale",
+        'Mermaid Trident', 'Mermaid Star', 'Medium Fridge', 'Meal Set', "Master's Coat", 'Main Stage',
+        'Magic Stone', 'Magazine', 'Luxury Gold Shades', 'Luxury Bed', 'Low Pumps', 'Leopard Loafers',
+        'Lemonade Stand', 'Leaf Cluster', 'Lava Lamp', 'Large Mixer', 'Large Chest', 'Laptop',
+        'Knot Slides', 'Knitted Scarf', 'Juice', 'Island Tea', 'Island Punch', 'Ingredient Bowl',
+        'Ice Cream Cake', 'Ice Cream Bucket', 'Hot Dog', 'Hoagie', 'Herbal Tea', 'Heart Shades',
+        'Headphones', 'Hair Treasure', 'Grocery Crate', 'Greeting Card', 'Green Cup Of Tea',
+        'Green Clip', 'Gourmet Meal', 'Golden Tea Set', 'Golden Pup', 'Golden Pumps',
+        'Golden Fascinator', 'Golden Award', 'Gold Trumpet', 'Gold Stilettos', 'Gold Shinny Dress',
+        'Glass of Red', 'Glass Teapot', 'Glass Tea Pot', 'Gladiator Sandals', 'Full Bowl',
+        'Frosty Brew', 'Fried Chicken Bucket', 'Fresh Mozzarella', 'Fresh Cocoa Beans', 'Food Bag',
+        'Fluffy Pup', 'Flower Clip', 'Flamingo Shades', 'Flaming Ring', 'Festive Maracas',
+        'Fancy Tea Time', 'Fancy Clasp', 'Fancy Beef', 'Entry Ticket', 'Empty Teapot',
+        'Empty Tea Pot', 'Empty Glass', 'Empty Bowl', 'Emerald Tea Set', 'Elegant Bow',
+        'Ear Buds', 'Drinks Crate', 'Dried Cacao Beans', 'Double Scoop', 'Dolphin Photo',
+        'Dog House', "Director's Seat", 'Digital Pet', 'Digital Camera', 'Diamond Heels',
+        'Designer Slides', 'Deluxe Wellington', 'Deluxe Sundae', 'Deluxe Rainbow Shades',
+        'Deluxe Dog', 'Cup Of Tea With Plant', 'Cup Of Tea With Cookie', 'Cup Of Tea',
+        'Crystal Star Shades', 'Cruise Magazine', 'Crown', 'Credits', 'Credit', 'Cream',
+        'Corgi Pup', 'Comb', 'Colorful Kaftan', 'Color Balls', "Collectors' DVD",
+        'Cocoa Powder', 'Coco-Colada', 'Club Sandwich', 'Clownfish Photo', 'Classic Popcorn',
+        'Circus Tent', 'Cinema Reel', 'Chocolate Truffle', 'Chocolate Chip', 'Choco-Chip Cookie',
+        'Chew Rope', 'Cheese Cube', 'Cheddar Wedge', 'Canned Food', 'Burger Meal', 'Burger Feast',
+        'Burger', 'Buckle Sandals', 'Bread Oven', 'Bread Flour', 'Bread Dough', 'Box of Truffles',
+        'Bowl Of Tea', 'Bow Pumps', 'Bow Platforms', 'Boombox', 'Bookmark', 'Blue Tang Photo',
+        'Blue One-Piece', 'Blue Long-Sleeve Set', 'Blue Boardshorts', 'Big Paper Cup', 'Big Bone',
+        'Berry Brain Freeze', 'Bee Comb', 'Beach-Tini', 'Beach Flops', 'Beach Bag',
+        'Basic Swimsuit Set', 'Banana Split', 'Ball Rope', 'Album Pack 2', 'Album Pack 1',
+        'Action Slate', '100 Credits'
+    ]),
+    'item_id_4_name': FixedSetValidator(allowed_values=[
+        'item_id_name', 'Action Slate', 'Ticket', 'Beach-Tini', 'Fresh Cocoa Beans', 'Blue One-Piece',
+        'Rainbow Shades', 'Single Scoop', 'Tea Leaf', 'Big Paper Cup', 'Milk Cooler', 'Cheese Cube',
+        'Greeting Card', 'Message in Bottle', 'Pink Cup Of Tea With Sugar', 'Glass Tea Pot', 'Low Pumps',
+        'Boombox', 'Pocket Player', 'Simple Pin', 'Triple Scoop', 'Packs_rarity_Five', 'Burger Meal',
+        'Burger Feast', 'Bee Comb', 'Pancakes a la Mode', 'Milk', 'Packs_rarity_Two', 'Golden Tea Set',
+        'Spin Toy', 'Headphones', 'Flaming Ring', 'Main Stage', 'Mixing Bowl', 'Crown', "Mermaids Shell",
+        'Gold Stilettos', 'Herbal Tea', 'Shoe Box', 'Squeaky Duck', 'Knitted Scarf', 'Poodle Pup',
+        'Gladiator Sandals', 'Pink Bikini', 'Basic Swimsuit Set', 'Ingredient Bowl', 'Empty Teapot',
+        'Colorful Kaftan', 'White Wedges', 'Flower Clip', 'Ring', 'Canned Food', 'Festive Maracas',
+        'Steaming Teapot', 'Large Chest', 'Fancy Beef', 'Chocolate Chip', "Master's Coat", 'Choco-Chip Cookie',
+        'Chew Rope', 'Double Scoop', 'cash', 'Bread Oven', 'Island Tea', 'Ice Cream Cake', 'Sliced Bread',
+        'Small Mixer', 'Bow Platforms', 'Grocery Crate', 'Resort Slides', 'Unicorn Cake', 'Comb',
+        'Cup Of Tea With Plant', 'Toy Box', 'Cocoa Powder', 'Tea Apparatus', 'Deluxe Wellington',
+        'Box of Truffles', 'Golden Pumps', 'Coco-Colada', 'Island Punch', 'Banana Split', 'Barbell Rack', 'Hoagie',
+        'Magic Stone', 'Triple Golden Cake', 'Blue Long-Sleeve Set', 'Sunny Heels', 'Purple Stilettos',
+        'Rottie Pup', 'Chocolate Truffle', 'Dolphin Photo', 'Paper Flower', 'Newspaper', 'Royal Tea Set',
+        'Gold Shinny Dress', 'Bread Flour', 'Glass of Red', 'Retro Yellows', 'White Kaftan', 'Plated Cup of Tea',
+        'Waffles a la Mode', 'Sundae', 'Tea Plant', 'Entry Ticket', 'Flamingo Shades', 'Tea Pot Generator',
+        'Bowl Of Tea', 'Ice Cream Bucket', 'Underwater Camera', 'Hot Dog', 'Paper Cup', 'Luxury Gold Shades',
+        'Movie Recorder', 'Rainbow Heels', 'Trick Hat', 'Green Cup Of Tea', 'Empty Tea Pot', 'Round Bed',
+        'Red Velvet Cake', 'Truffle Duo', 'Star Target', 'Cheddar Wedge', 'Golden Fascinator', 'Frosty Brew',
+        'Credits', 'Green Clip', "Mermaids Tears", 'Deluxe Rainbow Shades', 'Emerald Tea Set', 'Ruby Tea Set',
+        'Cinema Reel', 'Beach Bag', 'Clownfish Photo', 'Medium Fridge', 'Fried Chicken Bucket', 'Empty Glass',
+        'Designer Slides', 'Toast and Jam', 'Bread Dough', "Collectors' DVD", 'Purple Tee', 'Tea Time',
+        'Mermaid Trident', 'Hair Treasure', 'Simple Collar', 'Empty Bowl', 'Color Balls', 'Circus Tent',
+        'Packs_rarity_Three', 'Elegant Bow', 'Berry Brain Freeze', 'Blue Boardshorts', 'Short Shorts',
+        'Club Sandwich', 'Cream', 'Yellow Fancy One-Piece', 'Soft Serve', 'Drinks Crate', 'Tea Bowl',
+        'Classic Popcorn', 'Unbaked Bread', 'Pineapple Shades', 'Tea Bag', 'Leaf Cluster', 'Album Pack 2',
+        'Tea Infuser', 'Walking Set', 'Digital Pet', 'Mobile Phone', 'Leopard Loafers', 'Mix Tape',
+        'Rock Guitar', 'Gold Trumpet', 'Pink Shades', 'Watermelon Cocktail', 'Woven Heels', 'Fancy Tea Time',
+        'Deluxe Dog', 'Red Stilettos', 'Wedding Cake', 'Punch Bowl', 'Pearl', 'Tea & Treats', 'Ball Rope',
+        'Blue Tang Photo', 'VIP Carpet', 'Tambourine', 'Moorish Idol Photo', 'Juice', 'Glass Teapot',
+        'Lemonade Stand', 'Ear Buds', 'Fluffy Pup', 'Full Bowl', '100 Credits', 'Food Bag', 'Wired Headset',
+        'Fresh Mozzarella', 'credits', 'Album Pack 1', 'White Dress', 'Digital Camera', 'Pool Slides',
+        'Stage Mic', 'Cup Of Tea With Cookie', 'Tablet', 'Packs_rarity_Four', 'Fancy Clasp', 'Yellow Long-Sleeve',
+        'Triple Triple Hamburger', 'Unmixed Dough', 'Heart Shades', 'Rolling Pin', 'Red Slingbacks',
+        'Prime Tomahawk', 'Bookmark', 'White Sandals', 'Corgi Pup', 'Swiss Slices', 'Pitcher of Punch',
+        'Burger', 'One Rose', "Mermaids Scale", 'Shaped Loaves', 'Punch Fountain', 'Bow Pumps',
+        'Crystal Star Shades', 'Luxury Bed', 'Meal Set', 'Cruise Magazine', 'PB&J', 'Golden Award',
+        'Sport Tank', 'Knot Slides', 'Mermaid Star', 'Deluxe Sundae', 'Big Bone', 'Golden Pup',
+        'Gourmet Meal', 'Smart Watch', 'Dried Cacao Beans', 'Magazine', 'Diamond Heels', 'Show Cannon',
+        'Laptop', 'Lava Lamp', 'Purple Fancy Set', 'Beach Flops', 'Summer Spritzer', 'Buckle Sandals',
+        'Spiced Tea', 'Square Bed', 'Large Mixer', 'Dog House', 'Cup Of Tea', 'Sporty Pink One-Piece',
+        'Tea Date', "Director's Seat", 'Mirror', 'Credit', 'Shepherd Pup', 'Small Chest',
+        'Strawberry', 'Strawberry Shake', 'Gym Basics', 'Packs_rarity_One', 'VR Headset',
+        'Golden Champagne Tower', 'Gym Station', 'Jump Rope', 'item_id_name', 'credits', 'cash',
+        'Yellow Long-Sleeve', 'Yellow Fancy One-Piece', 'Woven Heels', 'Wired Headset', 'White Wedges',
+        'White Sandals', 'White Kaftan', 'White Dress', 'Wedding Cake', 'Watermelon Cocktail',
+        'Walking Set', 'Waffles a la Mode', 'VIP Carpet', 'Unmixed Dough', 'Unicorn Cake',
+        'Underwater Camera', 'Unbaked Bread', 'Truffle Duo', 'Triple Triple Hamburger', 'Triple Scoop',
+        'Triple Golden Cake', 'Trick Hat', 'Toy Box', 'Toast and Jam', 'Ticket', 'Tea Time',
+        'Tea Pot Generator', 'Tea Plant', 'Tea Leaf', 'Tea Infuser', 'Tea Date', 'Tea Bowl',
+        'Tea Bag', 'Tea Apparatus', 'Tea & Treats', 'Tambourine', 'Tablet', 'Swiss Slices',
+        'Sunny Heels', 'Sundae', 'Summer Spritzer', 'Steaming Teapot', 'Star Target', 'Stage Mic',
+        'Squeaky Duck', 'Square Bed', 'Sporty Pink One-Piece', 'Sport Tank', 'Spin Toy', 'Spiced Tea',
+        'Soft Serve', 'Smart Watch', 'Small Mixer', 'Small Chest', 'Sliced Bread', 'Single Scoop',
+        'Simple Pin', 'Simple Collar', 'Show Cannon', 'Short Shorts', 'Shoe Box', 'Shepherd Pup',
+        'Shaped Loaves', 'Ruby Tea Set', 'Royal Tea Set', 'Round Bed', 'Rottie Pup', 'Rolling Pin',
+        'Rock Guitar', 'Ring', 'Retro Yellows', 'Resort Slides', 'Red Velvet Cake', 'Red Stilettos',
+        'Red Slingbacks', 'Rainbow Shades', 'Rainbow Heels', 'Purple Tee', 'Purple Stilettos',
+        'Purple Fancy Set', 'Punch Fountain', 'Punch Bowl', 'Prime Tomahawk', 'Pool Slides',
+        'Poodle Pup', 'Pocket Player', 'Platform Flops', 'Plated Cup of Tea', 'Pitcher of Punch',
+        'Pink Shades', 'Pink Cup Of Tea With Sugar', 'Pink Bikini', 'Pineapple Shades', 'Pearl',
+        'Paper Flower', 'Paper Cup', 'Pancakes a la Mode', 'Packs_rarity_Two', 'Packs_rarity_Three',
+        'Packs_rarity_Four', 'Packs_rarity_Five', 'PB&J', 'One Rose', 'Newspaper', 'Movie Recorder',
+        'Moorish Idol Photo', 'Mobile Phone', 'Mixing Bowl', 'Mix Tape', 'Mirror', 'Milk Cooler',
+        'Milk', 'Message in Bottle', "Mermaids Tears", "Mermaids Shell", "Mermaids Scale",
+        'Mermaid Trident', 'Mermaid Star', 'Medium Fridge', 'Meal Set', "Master's Coat", 'Main Stage',
+        'Magic Stone', 'Magazine', 'Luxury Gold Shades', 'Luxury Bed', 'Low Pumps', 'Leopard Loafers',
+        'Lemonade Stand', 'Leaf Cluster', 'Lava Lamp', 'Large Mixer', 'Large Chest', 'Laptop',
+        'Knot Slides', 'Knitted Scarf', 'Juice', 'Island Tea', 'Island Punch', 'Ingredient Bowl',
+        'Ice Cream Cake', 'Ice Cream Bucket', 'Hot Dog', 'Hoagie', 'Herbal Tea', 'Heart Shades',
+        'Headphones', 'Hair Treasure', 'Grocery Crate', 'Greeting Card', 'Green Cup Of Tea',
+        'Green Clip', 'Gourmet Meal', 'Golden Tea Set', 'Golden Pup', 'Golden Pumps',
+        'Golden Fascinator', 'Golden Award', 'Gold Trumpet', 'Gold Stilettos', 'Gold Shinny Dress',
+        'Glass of Red', 'Glass Teapot', 'Glass Tea Pot', 'Gladiator Sandals', 'Full Bowl',
+        'Frosty Brew', 'Fried Chicken Bucket', 'Fresh Mozzarella', 'Fresh Cocoa Beans', 'Food Bag',
+        'Fluffy Pup', 'Flower Clip', 'Flamingo Shades', 'Flaming Ring', 'Festive Maracas',
+        'Fancy Tea Time', 'Fancy Clasp', 'Fancy Beef', 'Entry Ticket', 'Empty Teapot',
+        'Empty Tea Pot', 'Empty Glass', 'Empty Bowl', 'Emerald Tea Set', 'Elegant Bow',
+        'Ear Buds', 'Drinks Crate', 'Dried Cacao Beans', 'Double Scoop', 'Dolphin Photo',
+        'Dog House', "Director's Seat", 'Digital Pet', 'Digital Camera', 'Diamond Heels',
+        'Designer Slides', 'Deluxe Wellington', 'Deluxe Sundae', 'Deluxe Rainbow Shades',
+        'Deluxe Dog', 'Cup Of Tea With Plant', 'Cup Of Tea With Cookie', 'Cup Of Tea',
+        'Crystal Star Shades', 'Cruise Magazine', 'Crown', 'Credits', 'Credit', 'Cream',
+        'Corgi Pup', 'Comb', 'Colorful Kaftan', 'Color Balls', "Collectors' DVD",
+        'Cocoa Powder', 'Coco-Colada', 'Club Sandwich', 'Clownfish Photo', 'Classic Popcorn',
+        'Circus Tent', 'Cinema Reel', 'Chocolate Truffle', 'Chocolate Chip', 'Choco-Chip Cookie',
+        'Chew Rope', 'Cheese Cube', 'Cheddar Wedge', 'Canned Food', 'Burger Meal', 'Burger Feast',
+        'Burger', 'Buckle Sandals', 'Bread Oven', 'Bread Flour', 'Bread Dough', 'Box of Truffles',
+        'Bowl Of Tea', 'Bow Pumps', 'Bow Platforms', 'Boombox', 'Bookmark', 'Blue Tang Photo',
+        'Blue One-Piece', 'Blue Long-Sleeve Set', 'Blue Boardshorts', 'Big Paper Cup', 'Big Bone',
+        'Berry Brain Freeze', 'Bee Comb', 'Beach-Tini', 'Beach Flops', 'Beach Bag',
+        'Basic Swimsuit Set', 'Banana Split', 'Ball Rope', 'Album Pack 2', 'Album Pack 1',
+        'Action Slate', '100 Credits'
+    ]),
+    'item_id_5_name': FixedSetValidator(allowed_values=[
+        'item_id_name', 'Action Slate', 'Ticket', 'Beach-Tini', 'Fresh Cocoa Beans', 'Blue One-Piece',
+        'Rainbow Shades', 'Single Scoop', 'Tea Leaf', 'Big Paper Cup', 'Milk Cooler', 'Cheese Cube',
+        'Greeting Card', 'Message in Bottle', 'Pink Cup Of Tea With Sugar', 'Glass Tea Pot', 'Low Pumps',
+        'Boombox', 'Pocket Player', 'Simple Pin', 'Triple Scoop', 'Packs_rarity_Five', 'Burger Meal',
+        'Burger Feast', 'Bee Comb', 'Pancakes a la Mode', 'Milk', 'Packs_rarity_Two', 'Golden Tea Set',
+        'Spin Toy', 'Headphones', 'Flaming Ring', 'Main Stage', 'Mixing Bowl', 'Crown', "Mermaids Shell",
+        'Gold Stilettos', 'Herbal Tea', 'Shoe Box', 'Squeaky Duck', 'Knitted Scarf', 'Poodle Pup',
+        'Gladiator Sandals', 'Pink Bikini', 'Basic Swimsuit Set', 'Ingredient Bowl', 'Empty Teapot',
+        'Colorful Kaftan', 'White Wedges', 'Flower Clip', 'Ring', 'Canned Food', 'Festive Maracas',
+        'Steaming Teapot', 'Large Chest', 'Fancy Beef', 'Chocolate Chip', "Master's Coat", 'Choco-Chip Cookie',
+        'Chew Rope', 'Double Scoop', 'cash', 'Bread Oven', 'Island Tea', 'Ice Cream Cake', 'Sliced Bread',
+        'Small Mixer', 'Bow Platforms', 'Grocery Crate', 'Resort Slides', 'Unicorn Cake', 'Comb',
+        'Cup Of Tea With Plant', 'Toy Box', 'Cocoa Powder', 'Tea Apparatus', 'Deluxe Wellington',
+        'Box of Truffles', 'Golden Pumps', 'Coco-Colada', 'Island Punch', 'Banana Split', 'Barbell Rack', 'Hoagie',
+        'Magic Stone', 'Triple Golden Cake', 'Blue Long-Sleeve Set', 'Sunny Heels', 'Purple Stilettos',
+        'Rottie Pup', 'Chocolate Truffle', 'Dolphin Photo', 'Paper Flower', 'Newspaper', 'Royal Tea Set',
+        'Gold Shinny Dress', 'Bread Flour', 'Glass of Red', 'Retro Yellows', 'White Kaftan', 'Plated Cup of Tea',
+        'Waffles a la Mode', 'Sundae', 'Tea Plant', 'Entry Ticket', 'Flamingo Shades', 'Tea Pot Generator',
+        'Bowl Of Tea', 'Ice Cream Bucket', 'Underwater Camera', 'Hot Dog', 'Paper Cup', 'Luxury Gold Shades',
+        'Movie Recorder', 'Rainbow Heels', 'Trick Hat', 'Green Cup Of Tea', 'Empty Tea Pot', 'Round Bed',
+        'Red Velvet Cake', 'Truffle Duo', 'Star Target', 'Cheddar Wedge', 'Golden Fascinator', 'Frosty Brew',
+        'Credits', 'Green Clip', "Mermaids Tears", 'Deluxe Rainbow Shades', 'Emerald Tea Set', 'Ruby Tea Set',
+        'Cinema Reel', 'Beach Bag', 'Clownfish Photo', 'Medium Fridge', 'Fried Chicken Bucket', 'Empty Glass',
+        'Designer Slides', 'Toast and Jam', 'Bread Dough', "Collectors' DVD", 'Purple Tee', 'Tea Time',
+        'Mermaid Trident', 'Hair Treasure', 'Simple Collar', 'Empty Bowl', 'Color Balls', 'Circus Tent',
+        'Packs_rarity_Three', 'Elegant Bow', 'Berry Brain Freeze', 'Blue Boardshorts', 'Short Shorts',
+        'Club Sandwich', 'Cream', 'Yellow Fancy One-Piece', 'Soft Serve', 'Drinks Crate', 'Tea Bowl',
+        'Classic Popcorn', 'Unbaked Bread', 'Pineapple Shades', 'Tea Bag', 'Leaf Cluster', 'Album Pack 2',
+        'Tea Infuser', 'Walking Set', 'Digital Pet', 'Mobile Phone', 'Leopard Loafers', 'Mix Tape',
+        'Rock Guitar', 'Gold Trumpet', 'Pink Shades', 'Watermelon Cocktail', 'Woven Heels', 'Fancy Tea Time',
+        'Deluxe Dog', 'Red Stilettos', 'Wedding Cake', 'Punch Bowl', 'Pearl', 'Tea & Treats', 'Ball Rope',
+        'Blue Tang Photo', 'VIP Carpet', 'Tambourine', 'Moorish Idol Photo', 'Juice', 'Glass Teapot',
+        'Lemonade Stand', 'Ear Buds', 'Fluffy Pup', 'Full Bowl', '100 Credits', 'Food Bag', 'Wired Headset',
+        'Fresh Mozzarella', 'credits', 'Album Pack 1', 'White Dress', 'Digital Camera', 'Pool Slides',
+        'Stage Mic', 'Cup Of Tea With Cookie', 'Tablet', 'Packs_rarity_Four', 'Fancy Clasp', 'Yellow Long-Sleeve',
+        'Triple Triple Hamburger', 'Unmixed Dough', 'Heart Shades', 'Rolling Pin', 'Red Slingbacks',
+        'Prime Tomahawk', 'Bookmark', 'White Sandals', 'Corgi Pup', 'Swiss Slices', 'Pitcher of Punch',
+        'Burger', 'One Rose', "Mermaids Scale", 'Shaped Loaves', 'Punch Fountain', 'Bow Pumps',
+        'Crystal Star Shades', 'Luxury Bed', 'Meal Set', 'Cruise Magazine', 'PB&J', 'Golden Award',
+        'Sport Tank', 'Knot Slides', 'Mermaid Star', 'Deluxe Sundae', 'Big Bone', 'Golden Pup',
+        'Gourmet Meal', 'Smart Watch', 'Dried Cacao Beans', 'Magazine', 'Diamond Heels', 'Show Cannon',
+        'Laptop', 'Lava Lamp', 'Purple Fancy Set', 'Beach Flops', 'Summer Spritzer', 'Buckle Sandals',
+        'Spiced Tea', 'Square Bed', 'Large Mixer', 'Dog House', 'Cup Of Tea', 'Sporty Pink One-Piece',
+        'Tea Date', "Director's Seat", 'Mirror', 'Credit', 'Shepherd Pup', 'Small Chest',
+        'Strawberry', 'Strawberry Shake', 'Gym Basics', 'Packs_rarity_One', 'VR Headset',
+        'Golden Champagne Tower', 'Gym Station', 'Jump Rope', 'item_id_name', 'credits', 'cash',
+        'Yellow Long-Sleeve', 'Yellow Fancy One-Piece', 'Woven Heels', 'Wired Headset', 'White Wedges',
+        'White Sandals', 'White Kaftan', 'White Dress', 'Wedding Cake', 'Watermelon Cocktail',
+        'Walking Set', 'Waffles a la Mode', 'VIP Carpet', 'Unmixed Dough', 'Unicorn Cake',
+        'Underwater Camera', 'Unbaked Bread', 'Truffle Duo', 'Triple Triple Hamburger', 'Triple Scoop',
+        'Triple Golden Cake', 'Trick Hat', 'Toy Box', 'Toast and Jam', 'Ticket', 'Tea Time',
+        'Tea Pot Generator', 'Tea Plant', 'Tea Leaf', 'Tea Infuser', 'Tea Date', 'Tea Bowl',
+        'Tea Bag', 'Tea Apparatus', 'Tea & Treats', 'Tambourine', 'Tablet', 'Swiss Slices',
+        'Sunny Heels', 'Sundae', 'Summer Spritzer', 'Steaming Teapot', 'Star Target', 'Stage Mic',
+        'Squeaky Duck', 'Square Bed', 'Sporty Pink One-Piece', 'Sport Tank', 'Spin Toy', 'Spiced Tea',
+        'Soft Serve', 'Smart Watch', 'Small Mixer', 'Small Chest', 'Sliced Bread', 'Single Scoop',
+        'Simple Pin', 'Simple Collar', 'Show Cannon', 'Short Shorts', 'Shoe Box', 'Shepherd Pup',
+        'Shaped Loaves', 'Ruby Tea Set', 'Royal Tea Set', 'Round Bed', 'Rottie Pup', 'Rolling Pin',
+        'Rock Guitar', 'Ring', 'Retro Yellows', 'Resort Slides', 'Red Velvet Cake', 'Red Stilettos',
+        'Red Slingbacks', 'Rainbow Shades', 'Rainbow Heels', 'Purple Tee', 'Purple Stilettos',
+        'Purple Fancy Set', 'Punch Fountain', 'Punch Bowl', 'Prime Tomahawk', 'Pool Slides',
+        'Poodle Pup', 'Pocket Player', 'Platform Flops', 'Plated Cup of Tea', 'Pitcher of Punch',
+        'Pink Shades', 'Pink Cup Of Tea With Sugar', 'Pink Bikini', 'Pineapple Shades', 'Pearl',
+        'Paper Flower', 'Paper Cup', 'Pancakes a la Mode', 'Packs_rarity_Two', 'Packs_rarity_Three',
+        'Packs_rarity_Four', 'Packs_rarity_Five', 'PB&J', 'One Rose', 'Newspaper', 'Movie Recorder',
+        'Moorish Idol Photo', 'Mobile Phone', 'Mixing Bowl', 'Mix Tape', 'Mirror', 'Milk Cooler',
+        'Milk', 'Message in Bottle', "Mermaids Tears", "Mermaids Shell", "Mermaids Scale",
+        'Mermaid Trident', 'Mermaid Star', 'Medium Fridge', 'Meal Set', "Master's Coat", 'Main Stage',
+        'Magic Stone', 'Magazine', 'Luxury Gold Shades', 'Luxury Bed', 'Low Pumps', 'Leopard Loafers',
+        'Lemonade Stand', 'Leaf Cluster', 'Lava Lamp', 'Large Mixer', 'Large Chest', 'Laptop',
+        'Knot Slides', 'Knitted Scarf', 'Juice', 'Island Tea', 'Island Punch', 'Ingredient Bowl',
+        'Ice Cream Cake', 'Ice Cream Bucket', 'Hot Dog', 'Hoagie', 'Herbal Tea', 'Heart Shades',
+        'Headphones', 'Hair Treasure', 'Grocery Crate', 'Greeting Card', 'Green Cup Of Tea',
+        'Green Clip', 'Gourmet Meal', 'Golden Tea Set', 'Golden Pup', 'Golden Pumps',
+        'Golden Fascinator', 'Golden Award', 'Gold Trumpet', 'Gold Stilettos', 'Gold Shinny Dress',
+        'Glass of Red', 'Glass Teapot', 'Glass Tea Pot', 'Gladiator Sandals', 'Full Bowl',
+        'Frosty Brew', 'Fried Chicken Bucket', 'Fresh Mozzarella', 'Fresh Cocoa Beans', 'Food Bag',
+        'Fluffy Pup', 'Flower Clip', 'Flamingo Shades', 'Flaming Ring', 'Festive Maracas',
+        'Fancy Tea Time', 'Fancy Clasp', 'Fancy Beef', 'Entry Ticket', 'Empty Teapot',
+        'Empty Tea Pot', 'Empty Glass', 'Empty Bowl', 'Emerald Tea Set', 'Elegant Bow',
+        'Ear Buds', 'Drinks Crate', 'Dried Cacao Beans', 'Double Scoop', 'Dolphin Photo',
+        'Dog House', "Director's Seat", 'Digital Pet', 'Digital Camera', 'Diamond Heels',
+        'Designer Slides', 'Deluxe Wellington', 'Deluxe Sundae', 'Deluxe Rainbow Shades',
+        'Deluxe Dog', 'Cup Of Tea With Plant', 'Cup Of Tea With Cookie', 'Cup Of Tea',
+        'Crystal Star Shades', 'Cruise Magazine', 'Crown', 'Credits', 'Credit', 'Cream',
+        'Corgi Pup', 'Comb', 'Colorful Kaftan', 'Color Balls', "Collectors' DVD",
+        'Cocoa Powder', 'Coco-Colada', 'Club Sandwich', 'Clownfish Photo', 'Classic Popcorn',
+        'Circus Tent', 'Cinema Reel', 'Chocolate Truffle', 'Chocolate Chip', 'Choco-Chip Cookie',
+        'Chew Rope', 'Cheese Cube', 'Cheddar Wedge', 'Canned Food', 'Burger Meal', 'Burger Feast',
+        'Burger', 'Buckle Sandals', 'Bread Oven', 'Bread Flour', 'Bread Dough', 'Box of Truffles',
+        'Bowl Of Tea', 'Bow Pumps', 'Bow Platforms', 'Boombox', 'Bookmark', 'Blue Tang Photo',
+        'Blue One-Piece', 'Blue Long-Sleeve Set', 'Blue Boardshorts', 'Big Paper Cup', 'Big Bone',
+        'Berry Brain Freeze', 'Bee Comb', 'Beach-Tini', 'Beach Flops', 'Beach Bag',
+        'Basic Swimsuit Set', 'Banana Split', 'Ball Rope', 'Album Pack 2', 'Album Pack 1',
+        'Action Slate', '100 Credits'
+    ]),
     
     # Item ID validation (1-100000, no null)
     'item_id': RangeValidator(min_value=1, max_value=100000, allow_null=False),
@@ -928,6 +1507,11 @@ VALIDATORS = {
         "FirstTimeOffer", "AdMonReward", "SpecialOfferCredits", "Credits", "PersonalOffer"
     ]),
     
+    # Package type validation (fixed set of allowed values)
+    'package_type': FixedSetValidator(allowed_values=[
+        'Credits', 'DiscoWheel', 'FirstTimeOffer', 'PersonalOffer', 'SpecialOfferCredits'
+    ]),
+    
     # Store item ID validation (100-109999, no null) - same range as package_id
     'store_item_id': RangeValidator(min_value=100, max_value=109999, allow_null=False),
     
@@ -951,21 +1535,16 @@ VALIDATORS = {
     # Set stickers list validation (JSON array with sticker data pattern)
     'set_stickers_list': FormatValidator(pattern=r'^\[\"(\d+: \'count:\'\d+, rarity_id:\d+\"(,\")?)+\]$'),
     
-    # Source validation (fixed set of allowed values)
-    'source': FixedSetValidator(allowed_values=[
-        "source", "Missions", "PersonalOffer", "Reel", "TimedBoardTask"
-    ]),
-    
     # Album state validation (JSON array with album page pattern)
     # Supports empty arrays [] and empty pages like "5:"
     'album_state': FormatValidator(pattern=r'^\[\]$|^\[(\"(\d+:( \d+(, \d+)*)?)\",?)*\]$'),
     
-    # Item ID range validation (1-100000, no null) - applies to item_id_1, item_id_2, etc.
-    'item_id_1': RangeValidator(min_value=1, max_value=100000, allow_null=False),
-    'item_id_2': RangeValidator(min_value=1, max_value=100000, allow_null=False),
-    'item_id_3': RangeValidator(min_value=1, max_value=100000, allow_null=False),
-    'item_id_4': RangeValidator(min_value=1, max_value=100000, allow_null=False),
-    'item_id_5': RangeValidator(min_value=1, max_value=100000, allow_null=False),
+    # Item ID range validation (0-100000, no null) - applies to item_id_1, item_id_2, etc.
+    'item_id_1': RangeValidator(min_value=0, max_value=100000, allow_null=False),
+    'item_id_2': RangeValidator(min_value=0, max_value=100000, allow_null=False),
+    'item_id_3': RangeValidator(min_value=0, max_value=100000, allow_null=False),
+    'item_id_4': RangeValidator(min_value=0, max_value=100000, allow_null=False),
+    'item_id_5': RangeValidator(min_value=0, max_value=100000, allow_null=False),
     
     # Output ID validation (same as item_id_1) - range 1-100000, no null
     'output_id': RangeValidator(min_value=1, max_value=100000, allow_null=False),
@@ -986,30 +1565,269 @@ VALIDATORS = {
         "iPhone", "iPad", "Android", "OSXPlayer", "WindowsPlayer", "LinuxPlayer", "WebGLPlayer", "IPhonePlayer"
     ]),
     
-    # Chapter validation (1-120, allow null)
-    'chapter': RangeValidator(min_value=1, max_value=120, allow_null=True),
+    # Chapter validation (1-113, allow null)
+    'chapter': RangeValidator(min_value=1, max_value=113, allow_null=True),
     'theoretical_chapter': RangeValidator(min_value=1, max_value=120, allow_null=True),
     
     # Active tasks count validation (1-25, no null)
     'active_tasks_count': RangeValidator(min_value=1, max_value=25, allow_null=False),
     
-    # Delta credits validation (-200 to -1, no null)
-    'delta_credits': RangeValidator(min_value=-200, max_value=-1, allow_null=False),
-    
-    # Is counter validation (fixed set: True/False)
-    'is_counter': FixedSetValidator(allowed_values=["True", "False"]),
+    # Delta credits validation (-200 to 0, no null)
+    'delta_credits': RangeValidator(min_value=-200, max_value=0, allow_null=False),
     
     # Pack rarities weights validation (JSON array with slot_X_rarity pattern)
     'pack_rarities_weights': PackRaritiesWeightsValidator(),
-    
-    # Is turbo tip jar validation (fixed set: 1/0)
-    'is_turbo_tip_jar': FixedSetValidator(allowed_values=["1", "0"]),
     
     # Turbo tips remaining time validation (HH.MM:SS:MS format)
     'turbo_tips_remaining_time': FormatValidator(pattern=r'^\d{2}\.\d{2}:\d{2}:\d{2}$'),
     
     # Reason validation (supports various error/reason formats)
     'reason': FormatValidator(pattern=r'^[A-Za-z0-9\s\-_,:\[\]\(\)\.\/"]+$'),
+    
+    # Reward destination validation (fixed set for reward_destination_1-5)
+    'reward_destination_1': FixedSetValidator(allowed_values=['balance', 'reward_center', 'album']),
+    'reward_destination_2': FixedSetValidator(allowed_values=['balance', 'reward_center', 'album']),
+    'reward_destination_3': FixedSetValidator(allowed_values=['balance', 'reward_center', 'album']),
+    'reward_destination_4': FixedSetValidator(allowed_values=['balance', 'reward_center', 'album']),
+    'reward_destination_5': FixedSetValidator(allowed_values=['balance', 'reward_center', 'album']),
+    
+    # Range validators for various parameters
+    'number_of_events': RangeValidator(min_value=1, max_value=50, allow_null=False),
+    'eoc_event_id': RangeValidator(min_value=1, max_value=100, allow_null=False),
+    'item_sale_cost': RangeValidator(min_value=0, max_value=15, allow_null=False),
+    'player_room_number': RangeValidator(min_value=1, max_value=10, allow_null=False),
+    'ad_mon_event_id': RangeValidator(min_value=0, max_value=3, allow_null=False),
+    
+    # Object name validation (pattern for class names like "Common.Model.Item.EmbeddedItemData")
+    'object_name': FormatValidator(pattern=r'^[A-Za-z0-9_\.]+$'),
+    
+    # Entity type validation (fixed set)
+    'entity_type': FixedSetValidator(allowed_values=[
+        'TimedBoardTaskFeatureConfigData', 'StoreItemData', 'SeriesData', 'RecipesData',
+        'PromoFeatureConfigData', 'PersonalOfferConfigData', 'MissionsConfigData',
+        'LocalizationData', 'LiveOpsData', 'ItemData', 'GoalData',
+        'FusionFairFeatureConfigData', 'FlowersFeatureConfigData', 'DiscoConfigData',
+        'AlbumPackConfigData'
+    ]),
+    
+    # URL validation (pattern for various URL formats)
+    'url': FormatValidator(pattern=r'^https?://[^\s]+$'),
+    
+    # Inner exception message validation (allows various error message formats)
+    'inner_exception_message': FormatValidator(pattern=r'^[\s\S]+$'),
+    
+    # Request ID validation (UUID format)
+    'request_id': UuidValidator(),
+    
+    # Range validators for CEB and memory parameters
+    'ctv': RangeValidator(min_value=100, max_value=100000, allow_null=False),
+    'ceb_before_reset': RangeValidator(min_value=0, max_value=50000, allow_null=False),
+    'algo_ceb': RangeValidator(min_value=0, max_value=50000, allow_null=False),
+    'total_memory_size': RangeValidator(min_value=1741.0, max_value=23406.0, allow_null=False),
+    'counter_per_session_mp_side': RangeValidator(min_value=1, max_value=100000, allow_null=False),
+    'counter_per_session_game_side': RangeValidator(min_value=1, max_value=100000, allow_null=False),
+    
+    # Race leaderboard validation (JSON array pattern)
+    'race_leaderboard': FormatValidator(pattern=r'^\[.*\]$'),
+    
+    # Race-related range validators
+    'race_event_remaining_time': RangeValidator(min_value=0, max_value=1000000, allow_null=False),
+    'race_board_cycle': RangeValidator(min_value=1, max_value=100, allow_null=False),
+    'race_previous_rank': RangeValidator(min_value=1, max_value=5, allow_null=False),
+    
+    # Location validation (fixed set)
+    'location': FixedSetValidator(allowed_values=[
+        'location', 'race_preparatory_popup', 'race_popup', 'first_race_in_event', 'Lobby', 'Board'
+    ]),
+    
+    # Race points string validation (pattern like "21/45", "63/75")
+    'race_points_string': FormatValidator(pattern=r'^\d+/\d+$'),
+    
+    # CTA name validation (fixed set)
+    'cta_name': FixedSetValidator(allowed_values=[
+        'join', 'info', 'go_to_board', 'continue_later', 'close', 'avatar_edit', 'approve'
+    ]),
+    
+    # Generator name validation (fixed set)
+    'generator_name': FixedSetValidator(allowed_values=[
+        'Beach Bag', 'Bread Oven', 'Dog House', 'Drinks Crate', 'Food Bag', 'Grocery Crate',
+        'Haunted Music Box', 'Ice Cream Bucket', 'Large Chest', 'Medium Chest', 'Medium Fridge',
+        'Milk Cooler', 'Pastry Oven', 'Shoe Box', 'Small Chest', 'Steaming Teapot', 'Tea Plant',
+        'Tea Pot', 'Tea Pot Generator', 'Toy Box', 'Underwater Camera', 'Grocery Bag'
+    ]),
+    
+    # Generator ID validation (fixed set of float values)
+    'generator_id': FixedSetValidator(allowed_values=[
+        '299.0', '399.0', '505.0', '599.0', '692.0', '699.0', '781.0', '788.0', '1807.0',
+        '2100.0', '2553.0', '2559.0', '3201.0', '3202.0', '3203.0', '5109.0', '5199.0',
+        '5299.0', '5499.0', '7337.0'
+    ]),
+    
+    # Generator capacity left validation (range 0-20)
+    'generator_capacity_left': RangeValidator(min_value=0, max_value=20, allow_null=False),
+    
+    # Algo active tasks count validation (range 1-10)
+    'algo_active_tasks_count': RangeValidator(min_value=1, max_value=10, allow_null=False),
+    
+    # Delta credits validation (range -400 to 0)
+    'delta_credits': RangeValidator(min_value=-400, max_value=0, allow_null=False),
+    
+    # Is joker validation (fixed set: 0, 1)
+    'is_joker': FixedSetValidator(allowed_values=['0', '1']),
+    
+    # Is event completed validation (fixed set: 0, 1)
+    'is_event_completed': FixedSetValidator(allowed_values=['0', '1']),
+    
+    # Is EOC lobby badge validation (fixed set: 0, 1)
+    'is_eoc_lobby_badge': FixedSetValidator(allowed_values=['0', '1']),
+    
+    # Is counter validation (fixed set: True, False - no null)
+    'is_counter': FixedSetValidator(allowed_values=['True', 'False'], allow_null=False),
+    'interrupted_boolean': FixedSetValidator(allowed_values=['True', 'False'], allow_null=False),
+    
+    # Bubble index validation (range 0-40)
+    'bubble_index': RangeValidator(min_value=0, max_value=40, allow_null=False),
+    
+    # Exception type validation (fixed set)
+    'exception_type': FixedSetValidator(allowed_values=[
+        'AppException', 'Exception', 'FileNotFoundException', 'FirebaseException', 'IOException',
+        'InvalidOperationException', 'InvalidSignatureException', 'JsonReaderException',
+        'MessagePackSerializationException', 'NullReferenceException', 'RealmException',
+        'RealmInvalidDatabaseException', 'RealmInvalidTransactionException', 'SocketException',
+        'TargetInvocationException', 'TypeInitializationException'
+    ]),
+    
+    # Failure description product ID validation (pattern for product IDs like com.peerplay.mergecruise.credits799)
+    'failure_description_product_id': FormatValidator(pattern=r'^com\.peerplay\.mergecruise\.(fto\d+|credits\d+)$'),
+    
+    # Failure description reason validation (fixed set)
+    'failure_description_reason': FixedSetValidator(allowed_values=['DuplicateTransaction', 'PurchasingUnavailable', 'Unknown', 'UserCancelled']),
+    
+    # Click on screen raid validation (JSON array with tap_count, target_path, timestamp, x, y, threshold)
+    'click_on_screen_raid': FormatValidator(pattern=r'^\[.*\]$'),
+    
+    # Dropped item validation (JSON array with connected_id, drop_id, coordinates, timestamp)
+    'dropped_item': FormatValidator(pattern=r'^\[.*\]$'),
+    
+    # Transaction ID validation (numeric strings or alphanumeric with dots and dashes)
+    'transaction_id': FormatValidator(pattern=r'^[\d\w\-\.]+$'),
+    
+    # Source validation (updated fixed set)
+    'source': FixedSetValidator(allowed_values=[
+        'race_preparatory_popup', 'race_popup', 'ftue', 'TimedBoardTask', 'Reel',
+        'Race', 'PersonalOffer', 'Missions', 'MassCompensation', 'Disco'
+    ]),
+    
+    # Received stickers list validation (JSON array with slot patterns like "slot_1: 175, 3, missing, False")
+    'received_stickers_list': FormatValidator(pattern=r'^\[.*\]$'),
+    
+    # Pack rarities weights validation (JSON array with slot_*_rarity patterns)
+    'pack_rarities_weights': FormatValidator(pattern=r'^\[.*\]$'),
+    
+    # Entry reason validation (fixed set)
+    'entry_reason': FixedSetValidator(allowed_values=[
+        'FeatureStart', 'SetCompletion', 'ClickOnSet', 'ClickOnBadge'
+    ]),
+    
+    # Memory mono validation (range 1-20000)
+    'memory_mono': RangeValidator(min_value=1, max_value=20000, allow_null=False),
+    
+    # GPU total memory size validation (range 1-20000)
+    'gpu_total_memory_size': RangeValidator(min_value=1, max_value=20000, allow_null=False),
+    
+    # Is turbo tip jar validation (fixed set: 0, 1)
+    'is_turbo_tip_jar': FixedSetValidator(allowed_values=['0', '1']),
+    
+    # Trigger for state saving validation (fixed set)
+    'trigger_for_state_saving': FixedSetValidator(allowed_values=[
+        'ChapterCompleted', 'PurchaseCompleted', 'AppRatingCompleted', 'LoginCompleted'
+    ]),
+    
+    # File name validation (pattern for delta file names like delta_6919c56373244644bf73dac1_1764698748888.json)
+    'file_name': FormatValidator(pattern=r'^delta_[a-f0-9]+_\d+\.json$'),
+    
+    # PO array rewards validation (JSON array with reward patterns like "1: type: None, price: 2,99...")
+    'po_array_rewards': FormatValidator(pattern=r'^\[.*\]$'),
+    
+    # Board tasks info validation (JSON array with task patterns like "8025.ti", "8024.ti")
+    'board_tasks_info': FormatValidator(pattern=r'^\[.*\]$'),
+    
+    # Board task trigger validation (fixed set)
+    'board_task_trigger': FixedSetValidator(allowed_values=['Algo', 'FTUE', 'FallBack', 'Injections', 'None']),
+    
+    # No RV reason validation (text strings like "AdMon is not active.")
+    'no_rv_reason': FormatValidator(pattern=r'^.+$'),
+    
+    # Race segment ID validation (pattern for segment IDs)
+    'race_segment_id': FormatValidator(pattern=r'^(Group\d+|default)$'),
+    
+    # Delta JSON length validation (range 70-100000)
+    'delta_json_length': RangeValidator(min_value=70, max_value=100000, allow_null=False),
+    
+    # Race rank validation (fixed set: 1-5)
+    'race_rank': FixedSetValidator(allowed_values=['1', '2', '3', '4', '5']),
+    
+    # Popup name validation (fixed set)
+    'popup_name': FixedSetValidator(allowed_values=[
+        'AlbumPopup', 'DiscoPartyPopup', 'FlowersCompletePopup', 'FlowersEndPopup',
+        'FlowersProgressPopup', 'FusionFairCompletePopup', 'FusionFairEndPopup',
+        'FusionFairProgressPopup', 'MissionsPopup', 'PersonalOffer', 'PersonalOfferRolling',
+        'PersonalOfferTriple', 'Profile', 'PromoPopup', 'Race', 'RaceReStart', 'RaceStart',
+        'TournamentLeaderboardPopup', 'TutorialDiscoPopup', 'TutorialRacePopup'
+    ]),
+    
+    # Effort validation (range 1-6000)
+    'effort': RangeValidator(min_value=1, max_value=6000, allow_null=False),
+    
+    # Status code numeric validation (range 0-1000)
+    'status_code_numeric': RangeValidator(min_value=0, max_value=1000, allow_null=False),
+    
+    # Sticker ID validation (range 101-198)
+    'sticker_id': RangeValidator(min_value=101, max_value=198, allow_null=False),
+    
+    # Stream queue cleared validation (pattern for comma-separated popup names)
+    'stream_queue_cleared': FormatValidator(pattern=r'^[A-Za-z0-9\s,]+$'),
+    
+    # Avatar name validation (fixed set)
+    'avatar_name': FixedSetValidator(allowed_values=[
+        'Waitress', 'VacationGuy', 'VacationGrandpa', 'TyrellIdle_Frame', 'TravelGirl',
+        'SmartSchoolGirl', 'SmartMan2', 'SmartMan1', 'SmartGirl', 'SchoolGirl',
+        'RedheadOnVacation', 'PatryGuy', 'Parrot', 'Mateo_idle_frame', 'Kara_Emotion_idle_frame',
+        'HippyGuy2', 'HippyGuy', 'HawaiBeauty', 'Ginder', 'FunnyMan', 'ExplorerGirl',
+        'Elsa_IdleFrame', 'CuteNany', 'CurlyHairedGirl', 'CoolGuy', 'Chris_idle_frame',
+        'CaptainHamilton_idle_frame', 'BlondeGuy', 'BlondeGirl2', 'BlondeGirl',
+        'Bianca_idle_frame', 'Benny_idle_frame'
+    ]),
+    
+    # Is answer invalid validation (fixed set: true, false)
+    'is_answer_invalid': FixedSetValidator(allowed_values=['true', 'false']),
+    
+    # End reason validation (fixed set)
+    'end_reason': FixedSetValidator(allowed_values=['win', 'time_out', 'lose']),
+    
+    # Bots config found validation (fixed set: 0, 1)
+    'bots_config_found': FixedSetValidator(allowed_values=['0', '1']),
+    
+    # Ad impression ID validation (range 0-300)
+    'ad_impression_id': RangeValidator(min_value=0, max_value=300, allow_null=False),
+    
+    # Is race lobby badge validation (fixed set: 0, 1)
+    'is_race_lobby_badge': FixedSetValidator(allowed_values=['0', '1']),
+    
+    # Is disco lobby badge validation (fixed set: 0, 1)
+    'is_disco_lobby_badge': FixedSetValidator(allowed_values=['0', '1']),
+    
+    # Race live ops ID validation (range 1-5000)
+    'race_live_ops_id': RangeValidator(min_value=1, max_value=5000, allow_null=False),
+    
+    # Race board level validation (range 1-10)
+    'race_board_level': RangeValidator(min_value=1, max_value=10, allow_null=False),
+    
+    # Source version validation (same as version_float)
+    'source_version': FormatValidator(r'^[0-9]+\.[0-9]+$'),
+    
+    # Tasks left validation (fixed set: 0.0 to 7.0)
+    'tasks_left': FixedSetValidator(allowed_values=['0.0', '1.0', '2.0', '3.0', '4.0', '5.0', '6.0', '7.0']),
 }
 
 def validate_parameter(param_name: str, value: Any) -> bool:
