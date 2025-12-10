@@ -204,13 +204,13 @@ def query_table_data(_client, filters_tuple, selected_metrics_tuple):
     selected_metrics = list(selected_metrics_tuple)
     where_clause = build_where_clause(filters)
     
-    # Build SELECT clause for metrics
+    # Build SELECT clause for metrics - using weighted averages
     metric_selects = []
     for metric in selected_metrics:
         if metric == 'users':
             metric_selects.append("SUM(total_users) as users")
         else:
-            metric_selects.append(f"AVG({metric}) as {metric}")
+            metric_selects.append(f"SUM({metric} * total_users) / SUM(total_users) as {metric}")
     
     metrics_str = ", ".join(metric_selects)
     
@@ -234,7 +234,7 @@ def query_table_data(_client, filters_tuple, selected_metrics_tuple):
 
 @st.cache_data(ttl=60)
 def query_bar_chart_media_type(_client, filters_tuple, selected_metrics_tuple):
-    """Query data for media_type bar chart"""
+    """Query data for media_type bar chart - using weighted averages"""
     filters = dict(filters_tuple)
     selected_metrics = list(selected_metrics_tuple)
     where_clause = build_where_clause(filters)
@@ -244,7 +244,7 @@ def query_bar_chart_media_type(_client, filters_tuple, selected_metrics_tuple):
         if metric == 'users':
             metric_selects.append("SUM(total_users) as users")
         else:
-            metric_selects.append(f"AVG({metric}) as {metric}")
+            metric_selects.append(f"SUM({metric} * total_users) / SUM(total_users) as {metric}")
     
     metrics_str = ", ".join(metric_selects)
     
@@ -262,7 +262,7 @@ def query_bar_chart_media_type(_client, filters_tuple, selected_metrics_tuple):
 
 @st.cache_data(ttl=60)
 def query_bar_chart_version(_client, filters_tuple, selected_metrics_tuple):
-    """Query data for version bar chart"""
+    """Query data for version bar chart - using weighted averages"""
     filters = dict(filters_tuple)
     selected_metrics = list(selected_metrics_tuple)
     where_clause = build_where_clause(filters)
@@ -272,7 +272,7 @@ def query_bar_chart_version(_client, filters_tuple, selected_metrics_tuple):
         if metric == 'users':
             metric_selects.append("SUM(total_users) as users")
         else:
-            metric_selects.append(f"AVG({metric}) as {metric}")
+            metric_selects.append(f"SUM({metric} * total_users) / SUM(total_users) as {metric}")
     
     metrics_str = ", ".join(metric_selects)
     
@@ -316,12 +316,13 @@ def query_time_series(_client, filters_tuple, selected_metrics_tuple, time_granu
     
     where_clause = build_where_clause(time_filters)
     
+    # Using weighted averages for metrics
     metric_selects = []
     for metric in selected_metrics:
         if metric == 'users':
             metric_selects.append("SUM(total_users) as users")
         else:
-            metric_selects.append(f"AVG({metric}) as {metric}")
+            metric_selects.append(f"SUM({metric} * total_users) / SUM(total_users) as {metric}")
     
     metrics_str = ", ".join(metric_selects)
     
@@ -340,13 +341,14 @@ def query_time_series(_client, filters_tuple, selected_metrics_tuple, time_granu
 
 @st.cache_data(ttl=60)
 def query_average_metrics(_client, filters_tuple, columns_tuple):
-    """Return a single-row dataframe with AVG for each column."""
+    """Return a single-row dataframe with weighted AVG for each column."""
     filters = dict(filters_tuple)
     columns = list(columns_tuple)
     if not columns:
         return pd.DataFrame()
     where_clause = build_where_clause(filters)
-    metric_selects = [f"AVG({col}) as {col}" for col in columns]
+    # Using weighted averages: SUM(metric * total_users) / SUM(total_users)
+    metric_selects = [f"SUM({col} * total_users) / SUM(total_users) as {col}" for col in columns]
     metrics_str = ", ".join(metric_selects)
     query = f"""
     SELECT {metrics_str}
@@ -464,6 +466,13 @@ def main():
     default_start = (pd.Timestamp.today() - pd.DateOffset(months=3)).date()
     default_end = date.today()
     
+    # Find highest version with > 10K users for default selection
+    default_version_list = None
+    for v in version_values:  # Already sorted descending
+        if version_counts.get(v, 0) > 10000:
+            default_version_list = [v]
+            break
+    
     # Initialize session state for run filters (only on first load)
     if 'run_filters' not in st.session_state:
         st.session_state.run_filters = {
@@ -471,7 +480,7 @@ def main():
             'install_date_end': str(default_end),
             'install_week': None,
             'install_month': None,
-            'version': None,
+            'version': default_version_list,
             'platform': None,
             'mediasource': None,
             'mediatype': None,
@@ -519,6 +528,7 @@ def main():
         selected_versions = st.multiselect(
             "Version",
             version_values,
+            default=default_version_list if default_version_list else [],
             format_func=lambda v: f"{v} ({version_counts.get(v,0):,})",
             key="filter_version"
         )
@@ -758,13 +768,22 @@ def main():
                         name=metric,
                         line=dict(width=2)
                     ))
+            
+            # Get actual data range for x-axis (remove empty space)
+            x_min = time_df['time_period'].min()
+            x_max = time_df['time_period'].max()
+            
             fig.update_layout(
                 xaxis_title=time_granularity,
                 yaxis_title="Value",
                 height=500,
                 hovermode='x unified',
                 legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-                margin=dict(t=60, l=60, r=40, b=80)
+                margin=dict(t=60, l=60, r=40, b=80),
+                xaxis=dict(
+                    range=[x_min, x_max],
+                    autorange=False
+                )
             )
             st.plotly_chart(fig, use_container_width=True)
         else:
