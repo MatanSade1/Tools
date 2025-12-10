@@ -174,6 +174,16 @@ def build_where_clause(filters):
     if filters.get('mediatype'):
         types_str = "', '".join(map(str, filters['mediatype']))
         conditions.append(f"media_type IN ('{types_str}')")
+    
+    if filters.get('country'):
+        countries_str = "', '".join(map(str, filters['country']))
+        conditions.append(f"country IN ('{countries_str}')")
+    
+    # is_low_payers_country filter - only apply when explicitly set (not 'All')
+    if filters.get('is_low_payers') is not None and filters.get('is_low_payers') != 'All':
+        # is_low_payers_country is a boolean
+        is_low_payers_val = 'true' if filters['is_low_payers'] else 'false'
+        conditions.append(f"is_low_payers_country = {is_low_payers_val}")
 
     # Always filter out platform 'none'
     conditions.append("LOWER(platform) != 'none'")
@@ -445,13 +455,15 @@ def main():
         platform_values, platform_counts = get_filter_options(client, 'platform', filters={}, order="asc")
         source_values, source_counts = get_filter_options(client, 'mediasource', filters={}, order="asc")
         type_values, type_counts = get_filter_options(client, 'media_type', filters={}, order="asc")
+        country_values, country_counts = get_filter_options(client, 'country', filters={}, order="asc")
         return {
             'week': (week_values, week_counts),
             'month': (month_values, month_counts),
             'version': (version_values, version_counts),
             'platform': (platform_values, platform_counts),
             'source': (source_values, source_counts),
-            'type': (type_values, type_counts)
+            'type': (type_values, type_counts),
+            'country': (country_values, country_counts)
         }
     
     filter_opts = load_filter_options()
@@ -461,6 +473,7 @@ def main():
     platform_values, platform_counts = filter_opts['platform']
     source_values, source_counts = filter_opts['source']
     type_values, type_counts = filter_opts['type']
+    country_values, country_counts = filter_opts['country']
     
     # Default dates
     default_start = (pd.Timestamp.today() - pd.DateOffset(months=3)).date()
@@ -484,6 +497,8 @@ def main():
             'platform': None,
             'mediasource': None,
             'mediatype': None,
+            'country': ['US'],  # Default to US only
+            'is_low_payers': False,  # Default to False (non-low payers)
         }
         st.session_state.run_metrics = default_metrics
         st.session_state.dashboard_initialized = True
@@ -550,6 +565,20 @@ def main():
             format_func=lambda v: f"{v} ({type_counts.get(v,0):,})",
             key="filter_type"
         )
+        selected_countries = st.multiselect(
+            "Country",
+            country_values,
+            default=['US'] if 'US' in country_values else [],
+            format_func=lambda v: f"{v} ({country_counts.get(v,0):,})",
+            key="filter_country"
+        )
+        selected_is_low_payers = st.selectbox(
+            "Is Low Payers",
+            options=['All', False, True],
+            index=1,  # Default to False (non-low payers)
+            format_func=lambda v: "All" if v == 'All' else ("Yes" if v else "No"),
+            key="filter_is_low_payers"
+        )
 
         st.caption("Note: values in brackets show total users for each option.")
         
@@ -575,6 +604,8 @@ def main():
             'platform': selected_platforms if selected_platforms else None,
             'mediasource': selected_sources if selected_sources else None,
             'mediatype': selected_types if selected_types else None,
+            'country': selected_countries if selected_countries else None,
+            'is_low_payers': selected_is_low_payers,
         }
         st.session_state.run_metrics = selected_metrics
         st.rerun()  # Force rerun with new filters
