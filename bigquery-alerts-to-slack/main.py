@@ -579,11 +579,26 @@ class AlertProcessor:
         else:
             cooldown_text = "*Max alerts per day:*\nUnlimited"
 
-        # Format header text based on test mode
+        # Normalize row_count to int when possible
+        high_record_amount = False
+        try:
+            if row_count is not None and int(row_count) > 100:
+                high_record_amount = True
+                row_count = int(row_count)
+        except Exception:
+            pass
+
+        # Base header text based on environment
         if self.test_mode:
-            header_text = f"🧪 TEST: {alert.name}"
+            base_header = f":test_tube: TEST: {alert.name}"
         else:
-            header_text = f"🚨 {alert.name}"
+            base_header = f"🚨 {alert.name}"
+
+        # If many records returned, highlight high volume in the title
+        if high_record_amount:
+            header_text = f":exclamation: High Record Amount :exclamation: - {base_header}"
+        else:
+            header_text = base_header
 
         # Build message blocks
         blocks = [
@@ -594,7 +609,21 @@ class AlertProcessor:
                     "text": header_text,
                     "emoji": True
                 }
-            },
+            }
+        ]
+
+        # For high record volume, add a large header to emphasize row count
+        if high_record_amount:
+            blocks.append({
+                "type": "header",
+                "text": {
+                    "type": "plain_text",
+                    "text": f"Records returned: {row_count}",
+                    "emoji": True
+                }
+            })
+
+        blocks.extend([
             {
                 "type": "section",
                 "fields": [
@@ -630,7 +659,7 @@ class AlertProcessor:
                     }
                 ]
             }
-        ]
+        ])
 
         # SQL Query section removed per user request
 
@@ -640,7 +669,7 @@ class AlertProcessor:
                 "fields": [
                     {
                         "type": "mrkdwn",
-                        "text": f"*Number of query returned rows:*\n{row_count}"
+                        "text": f"*Number of query returned rows:*\n{('*' + str(row_count) + '*') if high_record_amount else row_count}"
                     },
                     {
                         "type": "mrkdwn",
@@ -904,15 +933,9 @@ class AlertProcessor:
             should_generate_alert = False
             threshold = alert.threshold_for_alerting or 1  # Default to 1 if not specified
             
-            # Check row count against threshold
+            # Check row count against threshold (threshold applies only to number of rows returned)
             if row_count >= threshold:
                 should_generate_alert = True
-            # If there are count columns, also check if any exceed the threshold
-            elif count_columns:
-                for col in count_columns:
-                    if isinstance(first_row[col], (int, float)) and first_row[col] >= threshold:
-                        should_generate_alert = True
-                        break
             
             slack_success = True
             logging_success = True
