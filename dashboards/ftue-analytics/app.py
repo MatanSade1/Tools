@@ -423,6 +423,92 @@ def filters_to_tuple(filters):
             items.append((k, v))
     return tuple(items)
 
+def parse_url_params():
+    """Parse URL query parameters for shareable links."""
+    params = st.query_params
+    url_filters = {}
+    
+    # Skip if 'code' is present (OAuth flow)
+    if 'code' in params:
+        return None
+    
+    # Parse date range
+    if 'start_date' in params:
+        url_filters['start_date'] = params['start_date']
+    if 'end_date' in params:
+        url_filters['end_date'] = params['end_date']
+    
+    # Parse comma-separated string filters
+    if 'install_week' in params:
+        url_filters['install_week'] = params['install_week'].split(',')
+    if 'install_month' in params:
+        url_filters['install_month'] = params['install_month'].split(',')
+    if 'platform' in params:
+        url_filters['platform'] = params['platform'].split(',')
+    if 'mediasource' in params:
+        url_filters['mediasource'] = params['mediasource'].split(',')
+    if 'mediatype' in params:
+        url_filters['mediatype'] = params['mediatype'].split(',')
+    if 'country' in params:
+        url_filters['country'] = params['country'].split(',')
+    
+    # Parse version (float values)
+    if 'version' in params:
+        try:
+            url_filters['version'] = [float(v) for v in params['version'].split(',')]
+        except ValueError:
+            pass
+    
+    # Parse is_low_payers (true/false/all)
+    if 'is_low_payers' in params:
+        val = params['is_low_payers'].lower()
+        if val == 'true':
+            url_filters['is_low_payers'] = True
+        elif val == 'false':
+            url_filters['is_low_payers'] = False
+        else:
+            url_filters['is_low_payers'] = 'All'
+    
+    return url_filters if url_filters else None
+
+
+def update_url_with_filters(filters):
+    """Update browser URL with current filter selections for shareable links."""
+    params = {}
+    
+    # Date range
+    if filters.get('install_date_start'):
+        params['start_date'] = str(filters['install_date_start'])
+    if filters.get('install_date_end'):
+        params['end_date'] = str(filters['install_date_end'])
+    
+    # List filters (comma-separated)
+    if filters.get('install_week'):
+        params['install_week'] = ','.join(str(v) for v in filters['install_week'])
+    if filters.get('install_month'):
+        params['install_month'] = ','.join(str(v) for v in filters['install_month'])
+    if filters.get('version'):
+        params['version'] = ','.join(str(v) for v in filters['version'])
+    if filters.get('platform'):
+        params['platform'] = ','.join(str(v) for v in filters['platform'])
+    if filters.get('mediasource'):
+        params['mediasource'] = ','.join(str(v) for v in filters['mediasource'])
+    if filters.get('mediatype'):
+        params['mediatype'] = ','.join(str(v) for v in filters['mediatype'])
+    if filters.get('country'):
+        params['country'] = ','.join(str(v) for v in filters['country'])
+    
+    # Boolean filter
+    if filters.get('is_low_payers') is not None:
+        if filters['is_low_payers'] == 'All':
+            params['is_low_payers'] = 'all'
+        else:
+            params['is_low_payers'] = 'true' if filters['is_low_payers'] else 'false'
+    
+    # Update URL without reloading
+    st.query_params.update(params)
+
+
 def main():
     # Authentication check
     if is_oauth_configured():
@@ -433,6 +519,9 @@ def main():
     
     st.title("📊 FTUE Analytics Dashboard")
     st.markdown("---")
+    
+    # Parse URL params for shareable links (do this early, after auth)
+    url_params = parse_url_params()
     
     client = get_bigquery_client()
     
@@ -487,8 +576,10 @@ def main():
             break
     
     # Initialize session state for run filters (only on first load)
+    # Use URL params if available, otherwise use defaults
     if 'run_filters' not in st.session_state:
-        st.session_state.run_filters = {
+        # Start with defaults
+        init_filters = {
             'install_date_start': str(default_start),
             'install_date_end': str(default_end),
             'install_week': None,
@@ -500,6 +591,34 @@ def main():
             'country': ['US'],  # Default to US only
             'is_low_payers': False,  # Default to False (non-low payers)
         }
+        
+        # Override with URL params if present (for shareable links)
+        if url_params:
+            if 'start_date' in url_params:
+                init_filters['install_date_start'] = url_params['start_date']
+            if 'end_date' in url_params:
+                init_filters['install_date_end'] = url_params['end_date']
+            if 'install_week' in url_params:
+                init_filters['install_week'] = url_params['install_week']
+            if 'install_month' in url_params:
+                init_filters['install_month'] = url_params['install_month']
+            if 'version' in url_params:
+                init_filters['version'] = url_params['version']
+            if 'platform' in url_params:
+                init_filters['platform'] = url_params['platform']
+            if 'mediasource' in url_params:
+                init_filters['mediasource'] = url_params['mediasource']
+            if 'mediatype' in url_params:
+                init_filters['mediatype'] = url_params['mediatype']
+            if 'country' in url_params:
+                init_filters['country'] = url_params['country']
+            if 'is_low_payers' in url_params:
+                init_filters['is_low_payers'] = url_params['is_low_payers']
+            
+            # Mark that we loaded from URL
+            st.session_state.loaded_from_url = True
+        
+        st.session_state.run_filters = init_filters
         st.session_state.run_metrics = default_metrics
         st.session_state.dashboard_initialized = True
     
@@ -509,73 +628,125 @@ def main():
         st.markdown("### 🚀 Run Analytics")
         run_button = st.button("Run Dashboard", type="primary", use_container_width=True)
         
+        # Shareable link section
+        st.markdown("---")
+        st.markdown("### 🔗 Share Dashboard")
+        st.caption("Click 'Run Dashboard' to update the URL with your filter selections, then copy and share the URL.")
+        
         st.markdown("---")
         st.header("🔍 Filters")
         
-        # Date range filter
+        # Date range filter - use URL params or session state if available
         st.subheader("Install Date Range")
+        
+        # Determine initial date values
+        init_start = default_start
+        init_end = default_end
+        if url_params and 'start_date' in url_params:
+            try:
+                init_start = datetime.strptime(url_params['start_date'], '%Y-%m-%d').date()
+            except:
+                pass
+        if url_params and 'end_date' in url_params:
+            try:
+                init_end = datetime.strptime(url_params['end_date'], '%Y-%m-%d').date()
+            except:
+                pass
+        
         date_start = st.date_input(
             "Start Date",
-            value=default_start,
+            value=init_start,
             key="date_start"
         )
         date_end = st.date_input(
             "End Date",
-            value=default_end,
+            value=init_end,
             key="date_end"
         )
         
         # Other filters
         st.subheader("Additional Filters")
         
+        # Determine defaults from URL params or standard defaults
+        def get_url_default(param_name, options_list):
+            """Get default values from URL params, filtering to valid options."""
+            if url_params and param_name in url_params:
+                return [v for v in url_params[param_name] if v in options_list]
+            return []
+        
         selected_weeks = st.multiselect(
             "Install Week",
             week_values,
+            default=get_url_default('install_week', week_values),
             format_func=lambda v: f"{v} ({week_counts.get(v,0):,})",
             key="filter_week"
         )
         selected_months = st.multiselect(
             "Install Month",
             month_values,
+            default=get_url_default('install_month', month_values),
             format_func=lambda v: f"{v} ({month_counts.get(v,0):,})",
             key="filter_month"
         )
+        
+        # Version defaults: use URL params, or highest version with >10K users
+        version_url_default = get_url_default('version', version_values)
+        version_default = version_url_default if version_url_default else (default_version_list if default_version_list else [])
         selected_versions = st.multiselect(
             "Version",
             version_values,
-            default=default_version_list if default_version_list else [],
+            default=version_default,
             format_func=lambda v: f"{v} ({version_counts.get(v,0):,})",
             key="filter_version"
         )
         selected_platforms = st.multiselect(
             "Platform",
             platform_values,
+            default=get_url_default('platform', platform_values),
             format_func=lambda v: f"{v} ({platform_counts.get(v,0):,})",
             key="filter_platform"
         )
         selected_sources = st.multiselect(
             "Media Source",
             source_values,
+            default=get_url_default('mediasource', source_values),
             format_func=lambda v: f"{v} ({source_counts.get(v,0):,})",
             key="filter_source"
         )
         selected_types = st.multiselect(
             "Media Type",
             type_values,
+            default=get_url_default('mediatype', type_values),
             format_func=lambda v: f"{v} ({type_counts.get(v,0):,})",
             key="filter_type"
         )
+        
+        # Country defaults: use URL params, or 'US'
+        country_url_default = get_url_default('country', country_values)
+        country_default = country_url_default if country_url_default else (['US'] if 'US' in country_values else [])
         selected_countries = st.multiselect(
             "Country",
             country_values,
-            default=['US'] if 'US' in country_values else [],
+            default=country_default,
             format_func=lambda v: f"{v} ({country_counts.get(v,0):,})",
             key="filter_country"
         )
+        
+        # Is Low Payers: determine default index from URL params
+        is_low_payers_default_index = 1  # Default to False
+        if url_params and 'is_low_payers' in url_params:
+            val = url_params['is_low_payers']
+            if val == 'All':
+                is_low_payers_default_index = 0
+            elif val == True:
+                is_low_payers_default_index = 2
+            else:
+                is_low_payers_default_index = 1
+        
         selected_is_low_payers = st.selectbox(
             "Is Low Payers",
             options=['All', False, True],
-            index=1,  # Default to False (non-low payers)
+            index=is_low_payers_default_index,
             format_func=lambda v: "All" if v == 'All' else ("Yes" if v else "No"),
             key="filter_is_low_payers"
         )
@@ -595,7 +766,7 @@ def main():
     
     # Only update filters when Run button is clicked
     if run_button:
-        st.session_state.run_filters = {
+        new_filters = {
             'install_date_start': str(date_start),
             'install_date_end': str(date_end),
             'install_week': selected_weeks if selected_weeks else None,
@@ -607,7 +778,12 @@ def main():
             'country': selected_countries if selected_countries else None,
             'is_low_payers': selected_is_low_payers,
         }
+        st.session_state.run_filters = new_filters
         st.session_state.run_metrics = selected_metrics
+        
+        # Update URL for shareable link
+        update_url_with_filters(new_filters)
+        
         st.rerun()  # Force rerun with new filters
     
     # Use stored filters (not current widget values)
