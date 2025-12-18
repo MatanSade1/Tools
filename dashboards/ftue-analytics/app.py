@@ -757,56 +757,63 @@ def main():
         st.markdown("---")
         st.subheader("📈 Metrics Selection")
         
-        # Quick action buttons
-        col1, col2 = st.columns(2)
-        with col1:
-            select_all = st.button("✅ Select All", use_container_width=True, key="select_all_btn")
-            select_pct = st.button("📊 PCT Only", use_container_width=True, key="select_pct_btn")
-        with col2:
-            deselect_all = st.button("❌ Deselect All", use_container_width=True, key="deselect_all_btn")
-            select_ratio = st.button("📈 Ratio Only", use_container_width=True, key="select_ratio_btn")
-        
         # Initialize metrics selection in session state if not present
         if 'selected_metrics_set' not in st.session_state:
             st.session_state.selected_metrics_set = set(default_metrics)
         
-        # Handle quick action buttons
-        if select_all:
+        # Quick action buttons - use on_click callbacks to avoid full rerun
+        def select_all_metrics():
             st.session_state.selected_metrics_set = set(all_metrics)
-            st.rerun()
-        if deselect_all:
+        def deselect_all_metrics():
             st.session_state.selected_metrics_set = set()
-            st.rerun()
-        if select_pct:
+        def select_pct_only():
             st.session_state.selected_metrics_set = set(pct_columns)
-            st.rerun()
-        if select_ratio:
+        def select_ratio_only():
             st.session_state.selected_metrics_set = set(ratio_columns)
-            st.rerun()
+        def select_all_pct():
+            st.session_state.selected_metrics_set.update(pct_columns)
+        def deselect_all_pct():
+            st.session_state.selected_metrics_set -= set(pct_columns)
+        def select_all_ratio():
+            st.session_state.selected_metrics_set.update(ratio_columns)
+        def deselect_all_ratio():
+            st.session_state.selected_metrics_set -= set(ratio_columns)
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            st.button("✅ Select All", use_container_width=True, key="select_all_btn", on_click=select_all_metrics)
+            st.button("📊 PCT Only", use_container_width=True, key="select_pct_btn", on_click=select_pct_only)
+        with col2:
+            st.button("❌ Deselect All", use_container_width=True, key="deselect_all_btn", on_click=deselect_all_metrics)
+            st.button("📈 Ratio Only", use_container_width=True, key="select_ratio_btn", on_click=select_ratio_only)
+        
+        # Callback functions for metric toggles
+        def toggle_metric(metric):
+            if metric in st.session_state.selected_metrics_set:
+                st.session_state.selected_metrics_set.discard(metric)
+            else:
+                st.session_state.selected_metrics_set.add(metric)
         
         # Users metric checkbox
-        include_users = st.checkbox(
+        st.checkbox(
             "👥 Include Users Count",
             value='users' in st.session_state.selected_metrics_set,
-            key="cb_users"
+            key="cb_users",
+            on_change=lambda: toggle_metric('users')
         )
-        if include_users:
-            st.session_state.selected_metrics_set.add('users')
-        else:
-            st.session_state.selected_metrics_set.discard('users')
+        
+        # Count selected metrics for display
+        pct_selected = len([m for m in pct_columns if m in st.session_state.selected_metrics_set])
+        ratio_selected = len([m for m in ratio_columns if m in st.session_state.selected_metrics_set])
         
         # PCT Metrics section with expander
-        with st.expander(f"📊 Conversion vs Step 1 ({len([m for m in pct_columns if m in st.session_state.selected_metrics_set])}/{len(pct_columns)} selected)", expanded=False):
+        with st.expander(f"📊 Conversion vs Step 1 ({pct_selected}/{len(pct_columns)} selected)", expanded=True):
             # Select/Deselect all PCT
             pct_col1, pct_col2 = st.columns(2)
             with pct_col1:
-                if st.button("Select All PCT", key="select_all_pct", use_container_width=True):
-                    st.session_state.selected_metrics_set.update(pct_columns)
-                    st.rerun()
+                st.button("Select All PCT", key="select_all_pct", use_container_width=True, on_click=select_all_pct)
             with pct_col2:
-                if st.button("Deselect All PCT", key="deselect_all_pct", use_container_width=True):
-                    st.session_state.selected_metrics_set -= set(pct_columns)
-                    st.rerun()
+                st.button("Deselect All PCT", key="deselect_all_pct", use_container_width=True, on_click=deselect_all_pct)
             
             # Checkboxes for PCT metrics in 2 columns
             pct_cols = st.columns(2)
@@ -816,28 +823,22 @@ def main():
                 label = f"{parts[1]}: {parts[2]}" if len(parts) >= 3 else metric
                 
                 with pct_cols[i % 2]:
-                    checked = st.checkbox(
+                    st.checkbox(
                         label,
                         value=metric in st.session_state.selected_metrics_set,
-                        key=f"cb_{metric}"
+                        key=f"cb_{metric}",
+                        on_change=toggle_metric,
+                        args=(metric,)
                     )
-                    if checked:
-                        st.session_state.selected_metrics_set.add(metric)
-                    else:
-                        st.session_state.selected_metrics_set.discard(metric)
         
         # Ratio Metrics section with expander
-        with st.expander(f"📈 Conversion vs Previous Step ({len([m for m in ratio_columns if m in st.session_state.selected_metrics_set])}/{len(ratio_columns)} selected)", expanded=False):
+        with st.expander(f"📈 Conversion vs Previous Step ({ratio_selected}/{len(ratio_columns)} selected)", expanded=True):
             # Select/Deselect all Ratio
             ratio_col1, ratio_col2 = st.columns(2)
             with ratio_col1:
-                if st.button("Select All Ratio", key="select_all_ratio", use_container_width=True):
-                    st.session_state.selected_metrics_set.update(ratio_columns)
-                    st.rerun()
+                st.button("Select All Ratio", key="select_all_ratio", use_container_width=True, on_click=select_all_ratio)
             with ratio_col2:
-                if st.button("Deselect All Ratio", key="deselect_all_ratio", use_container_width=True):
-                    st.session_state.selected_metrics_set -= set(ratio_columns)
-                    st.rerun()
+                st.button("Deselect All Ratio", key="deselect_all_ratio", use_container_width=True, on_click=deselect_all_ratio)
             
             # Checkboxes for Ratio metrics in 2 columns
             ratio_cols = st.columns(2)
@@ -847,15 +848,13 @@ def main():
                 label = f"{parts[1]} → {parts[2]}" if len(parts) >= 3 else metric
                 
                 with ratio_cols[i % 2]:
-                    checked = st.checkbox(
+                    st.checkbox(
                         label,
                         value=metric in st.session_state.selected_metrics_set,
-                        key=f"cb_{metric}"
+                        key=f"cb_{metric}",
+                        on_change=toggle_metric,
+                        args=(metric,)
                     )
-                    if checked:
-                        st.session_state.selected_metrics_set.add(metric)
-                    else:
-                        st.session_state.selected_metrics_set.discard(metric)
         
         # Convert set to list for compatibility
         selected_metrics = list(st.session_state.selected_metrics_set)
