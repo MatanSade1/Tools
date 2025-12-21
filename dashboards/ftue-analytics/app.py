@@ -991,43 +991,70 @@ def main():
         else:
             st.info("No data for step ratio chart.")
 
-        # 3. Bar Chart: Media Type with metric set toggle
-        # X-axis = metrics (steps), bars grouped by media_type
-        st.subheader("Bar Chart: Media Type")
-        # Initialize session state for toggle if not present
-        if 'media_metric_mode_idx' not in st.session_state:
-            st.session_state.media_metric_mode_idx = 0
-        media_metric_mode = st.selectbox(
-            "Metric set",
-            ["Conversion vs Step 1", "Conversion vs Previous Step"],
-            index=st.session_state.media_metric_mode_idx,
-            key="media_metric_mode"
-        )
-        # Save selection to session state
-        st.session_state.media_metric_mode_idx = 0 if media_metric_mode == "Conversion vs Step 1" else 1
+        # 3. Chart: Media Type with metric set toggle
+        # X-axis = metrics (steps), grouped by media_type
+        st.subheader("Chart: Media Type")
+        
+        # Chart type and metric set toggles
+        media_col1, media_col2 = st.columns(2)
+        with media_col1:
+            if 'media_chart_type_idx' not in st.session_state:
+                st.session_state.media_chart_type_idx = 0
+            media_chart_type = st.radio(
+                "Chart type",
+                ["Bar", "Line"],
+                index=st.session_state.media_chart_type_idx,
+                horizontal=True,
+                key="media_chart_type"
+            )
+            st.session_state.media_chart_type_idx = 0 if media_chart_type == "Bar" else 1
+        
+        with media_col2:
+            if 'media_metric_mode_idx' not in st.session_state:
+                st.session_state.media_metric_mode_idx = 0
+            media_metric_mode = st.selectbox(
+                "Metric set",
+                ["Conversion vs Step 1", "Conversion vs Previous Step"],
+                index=st.session_state.media_metric_mode_idx,
+                key="media_metric_mode"
+            )
+            st.session_state.media_metric_mode_idx = 0 if media_metric_mode == "Conversion vs Step 1" else 1
+        
         media_metrics = pct_columns if media_metric_mode == "Conversion vs Step 1" else ratio_columns
         with st.spinner("Loading media type chart..."):
             media_df = query_bar_chart_media_type(client, filters_tuple, tuple(media_metrics))
         
         if not media_df.empty:
             fig = go.Figure()
-            # Pivot: X-axis = metrics, bars = media_types
             metric_labels = format_step_labels(media_metrics)
+            
             for _, row in media_df.iterrows():
                 media_type = row['media_type']
                 values = [row[m] for m in media_metrics]
-                fig.add_trace(go.Bar(
-                    x=metric_labels,
-                    y=values,
-                    name=str(media_type),
-                    text=[f"{v:.1%}" if v is not None else None for v in values],
-                    textposition='inside',
-                    textangle=-90,
-                    textfont=dict(size=9, color='white'),
-                    insidetextanchor='middle'
-                ))
+                
+                if media_chart_type == "Bar":
+                    fig.add_trace(go.Bar(
+                        x=metric_labels,
+                        y=values,
+                        name=str(media_type),
+                        text=[f"{v:.1%}" if v is not None else None for v in values],
+                        textposition='inside',
+                        textangle=-90,
+                        textfont=dict(size=9, color='white'),
+                        insidetextanchor='middle'
+                    ))
+                else:  # Line chart
+                    fig.add_trace(go.Scatter(
+                        x=metric_labels,
+                        y=values,
+                        name=str(media_type),
+                        mode='lines+markers',
+                        line=dict(width=2),
+                        hovertemplate='%{y:.1%}<extra>%{fullData.name}</extra>'
+                    ))
+            
             fig.update_layout(
-                barmode='group',
+                barmode='group' if media_chart_type == "Bar" else None,
                 xaxis_title="FTUE Steps",
                 yaxis_title="Value",
                 height=550,
@@ -1039,41 +1066,70 @@ def main():
         else:
             st.info("No data for media type chart.")
         
-        # 4. Bar Chart: Version with metric set toggle
-        # X-axis = metrics (steps), bars grouped by version
-        st.subheader("Bar Chart: Version")
-        if 'version_metric_mode_idx' not in st.session_state:
-            st.session_state.version_metric_mode_idx = 0
-        version_metric_mode = st.selectbox(
-            "Metric set ",
-            ["Conversion vs Step 1", "Conversion vs Previous Step"],
-            index=st.session_state.version_metric_mode_idx,
-            key="version_metric_mode"
-        )
-        st.session_state.version_metric_mode_idx = 0 if version_metric_mode == "Conversion vs Step 1" else 1
+        # 4. Chart: Version with metric set toggle
+        # X-axis = metrics (steps), grouped by version
+        st.subheader("Chart: Version")
+        
+        # Chart type and metric set toggles
+        version_col1, version_col2 = st.columns(2)
+        with version_col1:
+            if 'version_chart_type_idx' not in st.session_state:
+                st.session_state.version_chart_type_idx = 0
+            version_chart_type = st.radio(
+                "Chart type",
+                ["Bar", "Line"],
+                index=st.session_state.version_chart_type_idx,
+                horizontal=True,
+                key="version_chart_type"
+            )
+            st.session_state.version_chart_type_idx = 0 if version_chart_type == "Bar" else 1
+        
+        with version_col2:
+            if 'version_metric_mode_idx' not in st.session_state:
+                st.session_state.version_metric_mode_idx = 0
+            version_metric_mode = st.selectbox(
+                "Metric set ",
+                ["Conversion vs Step 1", "Conversion vs Previous Step"],
+                index=st.session_state.version_metric_mode_idx,
+                key="version_metric_mode"
+            )
+            st.session_state.version_metric_mode_idx = 0 if version_metric_mode == "Conversion vs Step 1" else 1
+        
         version_metrics = pct_columns if version_metric_mode == "Conversion vs Step 1" else ratio_columns
         with st.spinner("Loading version chart..."):
             version_df = query_bar_chart_version(client, filters_tuple, tuple(version_metrics))
         
         if not version_df.empty:
             fig = go.Figure()
-            # Pivot: X-axis = metrics, bars = versions
             metric_labels = format_step_labels(version_metrics)
+            
             for _, row in version_df.iterrows():
                 version = row['version']
                 values = [row[m] for m in version_metrics]
-                fig.add_trace(go.Bar(
-                    x=metric_labels,
-                    y=values,
-                    name=str(version),
-                    text=[f"{v:.1%}" if v is not None else None for v in values],
-                    textposition='inside',
-                    textangle=-90,
-                    textfont=dict(size=9, color='white'),
-                    insidetextanchor='middle'
-                ))
+                
+                if version_chart_type == "Bar":
+                    fig.add_trace(go.Bar(
+                        x=metric_labels,
+                        y=values,
+                        name=str(version),
+                        text=[f"{v:.1%}" if v is not None else None for v in values],
+                        textposition='inside',
+                        textangle=-90,
+                        textfont=dict(size=9, color='white'),
+                        insidetextanchor='middle'
+                    ))
+                else:  # Line chart
+                    fig.add_trace(go.Scatter(
+                        x=metric_labels,
+                        y=values,
+                        name=str(version),
+                        mode='lines+markers',
+                        line=dict(width=2),
+                        hovertemplate='%{y:.1%}<extra>%{fullData.name}</extra>'
+                    ))
+            
             fig.update_layout(
-                barmode='group',
+                barmode='group' if version_chart_type == "Bar" else None,
                 xaxis_title="FTUE Steps",
                 yaxis_title="Value",
                 height=550,
