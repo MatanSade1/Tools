@@ -397,6 +397,42 @@ def query_version_summary(_client, filters_tuple, columns_tuple):
     return _client.query(query).to_dataframe()
 
 
+@st.cache_data(ttl=60)
+def query_installs_by_version(_client, filters_tuple):
+    """Return total installs per version (no double counting)."""
+    filters = dict(filters_tuple)
+    where_clause = build_where_clause(filters)
+    
+    query = f"""
+    SELECT 
+        CAST(install_version AS STRING) as version,
+        SUM(total_users) as installs
+    FROM `{TABLE_FULL}`
+    WHERE {where_clause}
+    GROUP BY install_version
+    ORDER BY install_version DESC
+    """
+    return _client.query(query).to_dataframe()
+
+
+@st.cache_data(ttl=60)
+def query_installs_by_media_type(_client, filters_tuple):
+    """Return total installs per media type (no double counting)."""
+    filters = dict(filters_tuple)
+    where_clause = build_where_clause(filters)
+    
+    query = f"""
+    SELECT 
+        COALESCE(media_type, 'Unknown') as media_type,
+        SUM(total_users) as installs
+    FROM `{TABLE_FULL}`
+    WHERE {where_clause}
+    GROUP BY media_type
+    ORDER BY installs DESC
+    """
+    return _client.query(query).to_dataframe()
+
+
 def format_step_labels(columns, prefix_len=4):
     """Format column names to readable step labels."""
     labels = []
@@ -1156,6 +1192,83 @@ def main():
                 st.dataframe(styled.style.apply(highlight_summary, axis=1), use_container_width=True)
             else:
                 st.dataframe(table_df, use_container_width=True)
+
+        st.markdown("---")
+
+        # 8. Pie Charts for Install Distribution
+        st.header("📊 Install Distribution")
+        
+        pie_col1, pie_col2 = st.columns(2)
+        
+        # Pie Chart: Installs by Version
+        with pie_col1:
+            st.subheader("Installs by Version")
+            with st.spinner("Loading version distribution..."):
+                version_installs_df = query_installs_by_version(client, filters_tuple)
+            
+            if not version_installs_df.empty:
+                fig_version = px.pie(
+                    version_installs_df,
+                    values='installs',
+                    names='version',
+                    title=f"Total: {version_installs_df['installs'].sum():,} installs",
+                    hole=0.3  # Donut chart style
+                )
+                fig_version.update_traces(
+                    textposition='inside',
+                    textinfo='percent+label',
+                    textfont_size=10
+                )
+                fig_version.update_layout(
+                    height=450,
+                    showlegend=True,
+                    legend=dict(
+                        orientation="h",
+                        yanchor="bottom",
+                        y=-0.3,
+                        xanchor="center",
+                        x=0.5
+                    ),
+                    margin=dict(t=60, l=20, r=20, b=80)
+                )
+                st.plotly_chart(fig_version, use_container_width=True)
+            else:
+                st.info("No version data available.")
+        
+        # Pie Chart: Installs by Media Type
+        with pie_col2:
+            st.subheader("Installs by Media Type")
+            with st.spinner("Loading media type distribution..."):
+                media_installs_df = query_installs_by_media_type(client, filters_tuple)
+            
+            if not media_installs_df.empty:
+                fig_media = px.pie(
+                    media_installs_df,
+                    values='installs',
+                    names='media_type',
+                    title=f"Total: {media_installs_df['installs'].sum():,} installs",
+                    hole=0.3  # Donut chart style
+                )
+                fig_media.update_traces(
+                    textposition='inside',
+                    textinfo='percent+label',
+                    textfont_size=10
+                )
+                fig_media.update_layout(
+                    height=450,
+                    showlegend=True,
+                    legend=dict(
+                        orientation="h",
+                        yanchor="bottom",
+                        y=-0.3,
+                        xanchor="center",
+                        x=0.5
+                    ),
+                    margin=dict(t=60, l=20, r=20, b=80)
+                )
+                st.plotly_chart(fig_media, use_container_width=True)
+            else:
+                st.info("No media type data available.")
     
     except Exception as e:
         st.error(f"Error loading data: {e}")
