@@ -994,11 +994,17 @@ def main():
         # 3. Bar Chart: Media Type with metric set toggle
         # X-axis = metrics (steps), bars grouped by media_type
         st.subheader("Bar Chart: Media Type")
+        # Initialize session state for toggle if not present
+        if 'media_metric_mode_idx' not in st.session_state:
+            st.session_state.media_metric_mode_idx = 0
         media_metric_mode = st.selectbox(
             "Metric set",
             ["Conversion vs Step 1", "Conversion vs Previous Step"],
+            index=st.session_state.media_metric_mode_idx,
             key="media_metric_mode"
         )
+        # Save selection to session state
+        st.session_state.media_metric_mode_idx = 0 if media_metric_mode == "Conversion vs Step 1" else 1
         media_metrics = pct_columns if media_metric_mode == "Conversion vs Step 1" else ratio_columns
         with st.spinner("Loading media type chart..."):
             media_df = query_bar_chart_media_type(client, filters_tuple, tuple(media_metrics))
@@ -1036,11 +1042,15 @@ def main():
         # 4. Bar Chart: Version with metric set toggle
         # X-axis = metrics (steps), bars grouped by version
         st.subheader("Bar Chart: Version")
+        if 'version_metric_mode_idx' not in st.session_state:
+            st.session_state.version_metric_mode_idx = 0
         version_metric_mode = st.selectbox(
             "Metric set ",
             ["Conversion vs Step 1", "Conversion vs Previous Step"],
+            index=st.session_state.version_metric_mode_idx,
             key="version_metric_mode"
         )
+        st.session_state.version_metric_mode_idx = 0 if version_metric_mode == "Conversion vs Step 1" else 1
         version_metrics = pct_columns if version_metric_mode == "Conversion vs Step 1" else ratio_columns
         with st.spinner("Loading version chart..."):
             version_df = query_bar_chart_version(client, filters_tuple, tuple(version_metrics))
@@ -1077,18 +1087,27 @@ def main():
 
         # 5. Time Series Chart
         st.subheader("Time Series Chart")
+        if 'time_metric_mode_idx' not in st.session_state:
+            st.session_state.time_metric_mode_idx = 0
         time_metric_mode = st.selectbox(
             "Metric set  ",
             ["Conversion vs Step 1", "Conversion vs Previous Step"],
+            index=st.session_state.time_metric_mode_idx,
             key="time_metric_mode"
         )
+        st.session_state.time_metric_mode_idx = 0 if time_metric_mode == "Conversion vs Step 1" else 1
         time_metrics = pct_columns if time_metric_mode == "Conversion vs Step 1" else ratio_columns
+        
+        if 'time_gran_idx' not in st.session_state:
+            st.session_state.time_gran_idx = 0
         time_granularity = st.radio(
             "Time Granularity",
             ["Daily", "Weekly", "Monthly"],
+            index=st.session_state.time_gran_idx,
             horizontal=True,
             key="time_gran"
         )
+        st.session_state.time_gran_idx = ["Daily", "Weekly", "Monthly"].index(time_granularity)
         
         with st.spinner(f"Loading {time_granularity.lower()} time series..."):
             time_df = query_time_series(client, filters_tuple, tuple(time_metrics), time_granularity)
@@ -1129,11 +1148,15 @@ def main():
 
         # 6. Version Summary Table
         st.header("📊 Version Summary Table")
+        if 'version_summary_mode_idx' not in st.session_state:
+            st.session_state.version_summary_mode_idx = 0
         version_summary_mode = st.selectbox(
             "Metric set",
             ["Conversion vs Step 1", "Conversion vs Previous Step"],
+            index=st.session_state.version_summary_mode_idx,
             key="version_summary_mode"
         )
+        st.session_state.version_summary_mode_idx = 0 if version_summary_mode == "Conversion vs Step 1" else 1
         version_summary_metrics = pct_columns if version_summary_mode == "Conversion vs Step 1" else ratio_columns
         
         with st.spinner("Loading version summary..."):
