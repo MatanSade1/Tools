@@ -398,6 +398,35 @@ def query_version_summary(_client, filters_tuple, columns_tuple):
 
 
 @st.cache_data(ttl=60)
+def query_steps_by_date(_client, filters_tuple, metrics_tuple, time_col='install_date'):
+    """Query step metrics over time for trend analysis."""
+    filters = dict(filters_tuple)
+    metrics = list(metrics_tuple)
+    if not metrics:
+        return pd.DataFrame()
+    
+    where_clause = build_where_clause(filters)
+    
+    # Build weighted average for each metric
+    metric_selects = []
+    for m in metrics:
+        metric_selects.append(f"SUM({m} * total_users) / SUM(total_users) as {m}")
+    
+    metrics_str = ", ".join(metric_selects)
+    
+    query = f"""
+    SELECT 
+        {time_col} as date,
+        {metrics_str}
+    FROM `{TABLE_FULL}`
+    WHERE {where_clause}
+    GROUP BY {time_col}
+    ORDER BY {time_col}
+    """
+    return _client.query(query).to_dataframe()
+
+
+@st.cache_data(ttl=60)
 def query_installs_by_version(_client, filters_tuple):
     """Return total installs per version (no double counting)."""
     filters = dict(filters_tuple)
@@ -1141,7 +1170,128 @@ def main():
         else:
             st.info("No data for version chart.")
 
-        # 5. Time Series Chart
+        # 5. FTUE Steps Trend (New chart - steps over time)
+        st.subheader("📈 FTUE Steps Trend by Date")
+        st.caption("Compare how each FTUE step's conversion rate changes over time")
+        
+        # Controls row
+        steps_trend_col1, steps_trend_col2, steps_trend_col3 = st.columns(3)
+        
+        with steps_trend_col1:
+            if 'steps_trend_mode_idx' not in st.session_state:
+                st.session_state.steps_trend_mode_idx = 0
+            steps_trend_mode = st.selectbox(
+                "Metric type",
+                ["Conversion vs Step 1", "Conversion vs Previous Step"],
+                index=st.session_state.steps_trend_mode_idx,
+                key="steps_trend_mode"
+            )
+            st.session_state.steps_trend_mode_idx = 0 if steps_trend_mode == "Conversion vs Step 1" else 1
+        
+        with steps_trend_col2:
+            if 'steps_trend_granularity_idx' not in st.session_state:
+                st.session_state.steps_trend_granularity_idx = 0
+            steps_trend_granularity = st.radio(
+                "Time granularity",
+                ["Daily", "Weekly", "Monthly"],
+                index=st.session_state.steps_trend_granularity_idx,
+                horizontal=True,
+                key="steps_trend_granularity"
+            )
+            st.session_state.steps_trend_granularity_idx = ["Daily", "Weekly", "Monthly"].index(steps_trend_granularity)
+        
+        # Determine which metrics to use
+        steps_trend_all_metrics = pct_columns if steps_trend_mode == "Conversion vs Step 1" else ratio_columns
+        
+        with steps_trend_col3:
+            # Step selection - default to first 10 steps
+            if 'steps_trend_selected' not in st.session_state:
+                st.session_state.steps_trend_selected = steps_trend_all_metrics[:10] if len(steps_trend_all_metrics) > 10 else steps_trend_all_metrics
+            
+            steps_trend_selected = st.multiselect(
+                "Select steps to display",
+                options=steps_trend_all_metrics,
+                default=st.session_state.steps_trend_selected[:10] if steps_trend_mode == "Conversion vs Step 1" else st.session_state.steps_trend_selected[:10],
+                format_func=lambda x: format_step_labels([x])[0],
+                key="steps_trend_select"
+            )
+        
+        # Quick select buttons
+        steps_btn_col1, steps_btn_col2, steps_btn_col3, steps_btn_col4 = st.columns(4)
+        with steps_btn_col1:
+            if st.button("First 10 Steps", key="steps_first10"):
+                st.session_state.steps_trend_selected = steps_trend_all_metrics[:10]
+                st.rerun()
+        with steps_btn_col2:
+            if st.button("Steps 11-20", key="steps_11_20"):
+                st.session_state.steps_trend_selected = steps_trend_all_metrics[10:20]
+                st.rerun()
+        with steps_btn_col3:
+            if st.button("Steps 21-30", key="steps_21_30"):
+                st.session_state.steps_trend_selected = steps_trend_all_metrics[20:30]
+                st.rerun()
+        with steps_btn_col4:
+            if st.button("All Steps", key="steps_all"):
+                st.session_state.steps_trend_selected = steps_trend_all_metrics
+                st.rerun()
+        
+        if steps_trend_selected:
+            # Determine time column based on granularity
+            time_col_map = {
+                'Daily': 'install_date',
+                'Weekly': 'install_week',
+                'Monthly': 'install_month'
+            }
+            time_col = time_col_map[steps_trend_granularity]
+            
+            with st.spinner(f"Loading {steps_trend_granularity.lower()} step trends..."):
+                steps_trend_df = query_steps_by_date(client, filters_tuple, tuple(steps_trend_selected), time_col)
+            
+            if not steps_trend_df.empty:
+                fig = go.Figure()
+                
+                for metric in steps_trend_selected:
+                    if metric in steps_trend_df.columns:
+                        label = format_step_labels([metric])[0]
+                        fig.add_trace(go.Scatter(
+                            x=steps_trend_df['date'],
+                            y=steps_trend_df[metric],
+                            name=label,
+                            mode='lines+markers',
+                            line=dict(width=2),
+                            hovertemplate=f'{label}<br>%{{x}}<br>%{{y:.1%}}<extra></extra>'
+                        ))
+                
+                # Get data range for x-axis
+                x_min = steps_trend_df['date'].min()
+                x_max = steps_trend_df['date'].max()
+                
+                fig.update_layout(
+                    xaxis_title=steps_trend_granularity,
+                    yaxis_title="Conversion Rate",
+                    yaxis_tickformat='.0%',
+                    height=550,
+                    hovermode='x unified',
+                    legend=dict(
+                        orientation="h",
+                        yanchor="bottom",
+                        y=1.02,
+                        xanchor="right",
+                        x=1
+                    ),
+                    margin=dict(t=60, l=60, r=40, b=80),
+                    xaxis=dict(
+                        range=[x_min, x_max],
+                        autorange=False
+                    )
+                )
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.info("No data available for the selected filters.")
+        else:
+            st.warning("Please select at least one step to display.")
+
+        # 6. Time Series Chart (existing)
         st.subheader("Time Series Chart")
         if 'time_metric_mode_idx' not in st.session_state:
             st.session_state.time_metric_mode_idx = 0
