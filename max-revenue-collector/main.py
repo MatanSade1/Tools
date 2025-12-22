@@ -34,9 +34,9 @@ logger = logging.getLogger(__name__)
 
 # Configuration
 PROJECT_ID = os.environ.get("GCP_PROJECT_ID", "yotam-395120")
-BIGQUERY_TABLE = os.environ.get("BIGQUERY_TABLE", "yotam-395120.peerplay.levelplay_revenue_data")
+BIGQUERY_TABLE = os.environ.get("BIGQUERY_TABLE", "yotam-395120.peerplay.max_revenue_data")
 MAX_API_KEY_SECRET = os.environ.get("MAX_API_KEY_SECRET", "max-api-key")
-MAX_API_ENDPOINT = "https://r.applovin.com/maxReport"
+MAX_API_ENDPOINT = "https://r.applovin.com/max/userAdRevenueReport"
 
 # Platform configurations
 PLATFORMS = [
@@ -154,110 +154,165 @@ def fetch_max_api_data(
     """
     Fetch user-level ad revenue data from MAX API for a specific platform.
     
+    The MAX User-Level API requires a single date per request, so we loop through each day.
+    The API returns a JSON with a URL to the actual CSV file.
+    
     Returns a list of dictionaries, each representing a row of data.
     """
     platform_name = platform_config["name"]
     logger.info(f"Fetching {platform_name} data from {start_date} to {end_date}")
     
-    params = {
-        "api_key": api_key,
-        "application": platform_config["application"],
-        "platform": platform_config["platform"],
-        "store_id": platform_config["store_id"],
-        "start": start_date,
-        "end": end_date,
-        "aggregated": "false",
-        "format": "csv",
-        "columns": "Date,Ad Unit ID,Ad Unit Name,Waterfall,Ad Format,Placement,Country,Device Type,IDFA,IDFV,User ID,Revenue,Ad Placement"
-    }
+    all_records = []
     
-    for attempt in range(MAX_RETRIES):
-        try:
-            logger.info(f"API request attempt {attempt + 1}/{MAX_RETRIES} for {platform_name}")
-            
-            response = requests.get(
-                MAX_API_ENDPOINT,
-                params=params,
-                timeout=300  # 5 minute timeout for large datasets
-            )
-            
-            if response.status_code == 200:
-                # Parse CSV response
-                csv_content = response.text
-                if not csv_content.strip():
-                    logger.warning(f"Empty response for {platform_name}")
-                    return []
+    # Parse dates and iterate through each day
+    from datetime import datetime as dt
+    start = dt.strptime(start_date, "%Y-%m-%d")
+    end = dt.strptime(end_date, "%Y-%m-%d")
+    
+    current = start
+    while current <= end:
+        date_str = current.strftime("%Y-%m-%d")
+        logger.info(f"Fetching {platform_name} data for {date_str}")
+        
+        # Use store_id only (API doesn't allow both store_id and application)
+        params = {
+            "api_key": api_key,
+            "platform": platform_config["platform"],
+            "store_id": platform_config["store_id"],
+            "date": date_str,
+            "aggregated": "false"
+        }
+        
+        for attempt in range(MAX_RETRIES):
+            try:
+                logger.info(f"API request attempt {attempt + 1}/{MAX_RETRIES} for {platform_name} on {date_str}")
                 
-                records = parse_csv_response(csv_content, platform_name)
-                logger.info(f"Successfully fetched {len(records)} records for {platform_name}")
-                return records
-            
-            elif response.status_code == 429:
-                # Rate limited
-                wait_time = RETRY_DELAY_SECONDS * (attempt + 1) * 2
-                logger.warning(f"Rate limited. Waiting {wait_time} seconds...")
-                time.sleep(wait_time)
-                continue
-            
-            else:
-                logger.error(f"API error for {platform_name}: {response.status_code} - {response.text[:500]}")
+                response = requests.get(
+                    MAX_API_ENDPOINT,
+                    params=params,
+                    timeout=60
+                )
+                
+                if response.status_code == 200:
+                    # Parse JSON response to get CSV URL
+                    try:
+                        json_response = response.json()
+                        logger.info(f"API Response: status={json_response.get('status')}")
+                        
+                        if json_response.get("status") != 200:
+                            logger.warning(f"API returned status {json_response.get('status')} for {platform_name} on {date_str}")
+                            break
+                        
+                        # Get the CSV URL (prefer ad_revenue_report_url for complete data)
+                        csv_url = json_response.get("ad_revenue_report_url") or json_response.get("url")
+                        
+                        if not csv_url:
+                            logger.warning(f"No CSV URL in response for {platform_name} on {date_str}")
+                            break
+                        
+                        # Download the CSV file
+                        logger.info(f"Downloading CSV from S3...")
+                        csv_response = requests.get(csv_url, timeout=300)
+                        
+                        if csv_response.status_code == 200:
+                            csv_content = csv_response.text
+                            if csv_content.strip():
+                                records = parse_csv_response(csv_content, platform_name)
+                                all_records.extend(records)
+                                logger.info(f"Fetched {len(records)} records for {platform_name} on {date_str}")
+                            else:
+                                logger.info(f"No data for {platform_name} on {date_str}")
+                        else:
+                            logger.error(f"Failed to download CSV: {csv_response.status_code}")
+                        
+                        break  # Success, move to next day
+                        
+                    except ValueError as e:
+                        logger.error(f"Invalid JSON response: {e}")
+                        logger.error(f"Response text: {response.text[:500]}")
+                        break
+                
+                elif response.status_code == 429:
+                    wait_time = RETRY_DELAY_SECONDS * (attempt + 1) * 2
+                    logger.warning(f"Rate limited. Waiting {wait_time} seconds...")
+                    time.sleep(wait_time)
+                    continue
+                
+                else:
+                    logger.error(f"API error for {platform_name} on {date_str}: {response.status_code} - {response.text[:500]}")
+                    if attempt < MAX_RETRIES - 1:
+                        time.sleep(RETRY_DELAY_SECONDS * (attempt + 1))
+                        continue
+                    break
+                    
+            except requests.exceptions.Timeout:
+                logger.warning(f"Request timeout for {platform_name} on {date_str}, attempt {attempt + 1}")
                 if attempt < MAX_RETRIES - 1:
                     time.sleep(RETRY_DELAY_SECONDS * (attempt + 1))
                     continue
-                raise Exception(f"MAX API returned {response.status_code}: {response.text[:500]}")
-                
-        except requests.exceptions.Timeout:
-            logger.warning(f"Request timeout for {platform_name}, attempt {attempt + 1}")
-            if attempt < MAX_RETRIES - 1:
-                time.sleep(RETRY_DELAY_SECONDS * (attempt + 1))
-                continue
-            raise
+                break
+            
+            except requests.exceptions.RequestException as e:
+                logger.error(f"Request error for {platform_name} on {date_str}: {e}")
+                if attempt < MAX_RETRIES - 1:
+                    time.sleep(RETRY_DELAY_SECONDS * (attempt + 1))
+                    continue
+                break
         
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Request error for {platform_name}: {e}")
-            if attempt < MAX_RETRIES - 1:
-                time.sleep(RETRY_DELAY_SECONDS * (attempt + 1))
-                continue
-            raise
+        # Move to next day
+        current += timedelta(days=1)
     
-    raise Exception(f"Failed to fetch {platform_name} data after {MAX_RETRIES} attempts")
+    logger.info(f"Total records fetched for {platform_name}: {len(all_records)}")
+    return all_records
 
 
 def parse_csv_response(csv_content: str, platform_name: str) -> List[Dict]:
     """
     Parse CSV response from MAX API into list of dictionaries.
     Maps CSV columns to BigQuery schema.
+    
+    Expected MAX API columns (non-aggregated):
+    - Date, Ad Unit ID, Ad Unit Name, Placement, IDFA, IDFV, User Id, Revenue
+    - Ad Format, Ad Placement, Country, Device Type, Network, Waterfall, Custom Data
     """
     records = []
+    
+    # Log first 500 chars of response to see column names
+    logger.info(f"CSV Response preview: {csv_content[:500]}")
     
     # Use StringIO to read CSV from string
     csv_file = io.StringIO(csv_content)
     reader = csv.DictReader(csv_file)
     
+    # Log available columns
+    if reader.fieldnames:
+        logger.info(f"Available columns: {reader.fieldnames}")
+    
     for row in reader:
         try:
-            # Map CSV columns to BigQuery schema
-            # Handle the date field - convert to proper timestamp format
+            # Handle the date field
+            # MAX API uses "Date" column with format like "2019-07-29 15:53:07.39"
             date_str = row.get("Date", "")
+            date_value = None
+            
             if date_str:
-                # Parse the date string and convert to ISO format
-                # Expected format: "2019-07-29 15:53:07.39"
                 try:
-                    # Try parsing with milliseconds
-                    dt = datetime.strptime(date_str.split(".")[0], "%Y-%m-%d %H:%M:%S")
-                    # Add back milliseconds if present
+                    # Try parsing with milliseconds: "2019-07-29 15:53:07.39"
+                    base_str = date_str.split(".")[0]
+                    dt = datetime.strptime(base_str, "%Y-%m-%d %H:%M:%S")
                     if "." in date_str:
                         ms_part = date_str.split(".")[1]
-                        # Pad to 6 digits for microseconds
                         ms_part = ms_part.ljust(6, '0')[:6]
                         dt = dt.replace(microsecond=int(ms_part))
+                    date_value = dt.isoformat()
                 except ValueError:
-                    # Try date only format
-                    dt = datetime.strptime(date_str[:10], "%Y-%m-%d")
-                
-                date_value = dt.isoformat()
-            else:
-                date_value = None
+                    try:
+                        # Try date only format
+                        dt = datetime.strptime(date_str[:10], "%Y-%m-%d")
+                        date_value = dt.isoformat()
+                    except ValueError:
+                        logger.warning(f"Could not parse date: {date_str}")
+                        date_value = None
             
             # Parse revenue as float
             revenue_str = row.get("Revenue", "0")
@@ -277,17 +332,17 @@ def parse_csv_response(csv_content: str, platform_name: str) -> List[Dict]:
                 "device_type": row.get("Device Type", ""),
                 "idfa": row.get("IDFA", ""),
                 "idfv": row.get("IDFV", ""),
-                "user_id": row.get("User ID", ""),
+                "user_id": row.get("User Id", ""),  # Note: "User Id" with lowercase 'd'
                 "revenue": revenue,
                 "ad_placement": row.get("Ad Placement", ""),
-                "platform": platform_name  # Add platform for tracking
+                "platform": platform_name
             }
             
             # Only add records with valid dates
             if date_value:
                 records.append(record)
             else:
-                logger.warning(f"Skipping record with invalid date: {row}")
+                logger.warning(f"Skipping record with invalid/missing date: {row}")
                 
         except Exception as e:
             logger.warning(f"Error parsing row: {e}. Row: {row}")

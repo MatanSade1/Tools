@@ -32,7 +32,7 @@ SECRET_NAME="max-api-key"
 
 # BigQuery
 BQ_DATASET="peerplay"
-BQ_TABLE="levelplay_revenue_data"
+BQ_TABLE="max_revenue_data"
 BQ_FULL_TABLE="${PROJECT_ID}.${BQ_DATASET}.${BQ_TABLE}"
 
 # Cloud Scheduler
@@ -100,18 +100,21 @@ echo "Granting IAM roles..."
 gcloud projects add-iam-policy-binding ${PROJECT_ID} \
     --member="serviceAccount:${SERVICE_ACCOUNT_EMAIL}" \
     --role="roles/bigquery.dataEditor" \
+    --condition=None \
     --quiet
 
 # BigQuery Job User - for running queries
 gcloud projects add-iam-policy-binding ${PROJECT_ID} \
     --member="serviceAccount:${SERVICE_ACCOUNT_EMAIL}" \
     --role="roles/bigquery.jobUser" \
+    --condition=None \
     --quiet
 
 # Secret Manager Secret Accessor - for API key
 gcloud projects add-iam-policy-binding ${PROJECT_ID} \
     --member="serviceAccount:${SERVICE_ACCOUNT_EMAIL}" \
     --role="roles/secretmanager.secretAccessor" \
+    --condition=None \
     --quiet
 
 echo "IAM roles granted"
