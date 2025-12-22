@@ -34,7 +34,7 @@ def check_authorization(email):
 def get_google_oauth_url():
     client_id = get_secret('GOOGLE_OAUTH_CLIENT_ID')
     client_secret = get_secret('GOOGLE_OAUTH_CLIENT_SECRET')
-    redirect_uri = get_secret('STREAMLIT_REDIRECT_URI') or "http://localhost:8501/"
+    redirect_uri = get_secret('STREAMLIT_REDIRECT_URI') or "http://localhost:8502/"
     if not client_id or not client_secret:
         return None
     flow = Flow.from_client_config(
@@ -56,7 +56,7 @@ def authenticate_user():
         try:
             client_id = get_secret('GOOGLE_OAUTH_CLIENT_ID')
             client_secret = get_secret('GOOGLE_OAUTH_CLIENT_SECRET')
-            redirect_uri = get_secret('STREAMLIT_REDIRECT_URI') or "http://localhost:8501/"
+            redirect_uri = get_secret('STREAMLIT_REDIRECT_URI') or "http://localhost:8502/"
             flow = Flow.from_client_config(
                 {"web": {"client_id": client_id, "client_secret": client_secret,
                          "auth_uri": "https://accounts.google.com/o/oauth2/auth",
@@ -109,6 +109,10 @@ import pandas as pd
 from google.cloud import bigquery
 from datetime import datetime, date
 
+# Increase pandas styler max elements to handle large dataframes
+# Set to a very large number instead of None to avoid Streamlit conversion errors
+pd.set_option("styler.render.max_elements", 10**9)
+
 # BigQuery configuration
 PROJECT_ID = 'yotam-395120'
 DATASET_ID = 'peerplay'
@@ -128,6 +132,7 @@ AVAILABLE_DIMENSIONS = {
     'country': 'country',
     'mediasource': 'mediasource',
     'campaign': 'campaign_name',
+    'media_type': 'media_type',
     'install_date': 'install_date',
     'install_week': 'week',
     'install_month': 'month',
@@ -140,6 +145,9 @@ DAY_COLUMNS = [0, 1, 3, 7, 14, 21, 30, 45, 60, 75, 90, 120, 150, 180, 210, 240, 
 def build_where_clause(filters):
     """Build WHERE clause from filters"""
     conditions = []
+    
+    # Always exclude current date
+    conditions.append("install_date < CURRENT_DATE()")
     
     if filters.get('install_date_start') and filters.get('install_date_end'):
         conditions.append(f"install_date BETWEEN '{filters['install_date_start']}' AND '{filters['install_date_end']}'")
@@ -168,7 +176,7 @@ def build_where_clause(filters):
         is_test_val = 'true' if filters['is_test_campaign'] else 'false'
         conditions.append(f"is_test_campaign = {is_test_val}")
     
-    return " AND ".join(conditions) if conditions else "1=1"
+    return " AND ".join(conditions) if conditions else "install_date < CURRENT_DATE()"
 
 def get_filter_options(client, column, filters):
     """Get distinct values for a column under current filters."""
@@ -189,6 +197,15 @@ def build_cost_expression(add_rt_cost):
     else:
         return "COALESCE(cost, 0)"
 
+def build_net_revenue_expression(day, net_share_method):
+    """Build net revenue expression based on net share method selection"""
+    if net_share_method == "fixed_15":
+        # Use fixed_15 column when method is fixed_15, otherwise use actual
+        return f"CASE WHEN net_share = 'fixed_15' THEN COALESCE(d{day}_total_net_revenue_15_pct, 0) ELSE COALESCE(d{day}_total_net_revenue, 0) END"
+    else:
+        # Use actual net revenue for all rows
+        return f"COALESCE(d{day}_total_net_revenue, 0)"
+
 def build_group_by_clause(selected_dimensions):
     """Build GROUP BY clause from selected dimensions"""
     if not selected_dimensions:
@@ -204,7 +221,7 @@ def build_order_by_clause(selected_dimensions):
     return ", ".join([f"{col} DESC" for col in dimension_cols])
 
 @st.cache_data(ttl=60)
-def query_roas_table(_client, filters_tuple, selected_dimensions_tuple, add_rt_cost):
+def query_roas_table(_client, filters_tuple, selected_dimensions_tuple, add_rt_cost, net_share_method):
     """Query ROAS table data"""
     filters = dict(filters_tuple)
     selected_dimensions = list(selected_dimensions_tuple)
@@ -232,13 +249,15 @@ def query_roas_table(_client, filters_tuple, selected_dimensions_tuple, add_rt_c
         "SUM(installs) / NULLIF(COUNT(DISTINCT install_date), 0) as avg_daily_installs"
     ]
     
-    # Add ROAS metrics
+    # Add ROAS metrics with net share method logic
     for day in DAY_COLUMNS:
-        metric_selects.append(f"SUM(d{day}_total_net_revenue) / NULLIF(SUM({cost_expr}), 0) as d{day}_roas")
-        metric_selects.append(f"SUM(d{day}_total_net_revenue) as d{day}_total_net_revenue")
+        net_revenue_expr = build_net_revenue_expression(day, net_share_method)
+        metric_selects.append(f"SUM({net_revenue_expr}) / NULLIF(SUM({cost_expr}), 0) * 100 as d{day}_roas")
+        metric_selects.append(f"SUM({net_revenue_expr}) as d{day}_total_net_revenue")
     
-    metric_selects.append(f"SUM(ltv_total_net_revenue) / NULLIF(SUM({cost_expr}), 0) as ltv_roas")
-    metric_selects.append("SUM(ltv_total_net_revenue) as ltv_total_net_revenue")
+    # LTV metrics (use actual net revenue for LTV)
+    metric_selects.append(f"SUM(COALESCE(ltv_total_net_revenue, 0)) / NULLIF(SUM({cost_expr}), 0) * 100 as ltv_roas")
+    metric_selects.append("SUM(COALESCE(ltv_total_net_revenue, 0)) as ltv_total_net_revenue")
     
     metrics_str = ", ".join(metric_selects)
     
@@ -516,55 +535,107 @@ def add_summary_row(df, table_type, selected_dimensions):
             distinct_dates = len(df)
         summary_row['avg_daily_installs'] = total_installs / distinct_dates if distinct_dates > 0 else 0
     
+    # Get diff_from_today for filtering (only include fully completed periods)
+    # Work with a copy to avoid modifying the original dataframe
+    df_work = df.copy()
+    diff_col = None
+    if 'diff_from_today' in df_work.columns:
+        # Convert to numeric if possible
+        try:
+            df_work['_diff_numeric'] = pd.to_numeric(df_work['diff_from_today'], errors='coerce')
+            diff_col = '_diff_numeric'
+        except:
+            pass
+    
     # Table-specific metrics
     if table_type == 'roas':
-        total_cost = df['cost'].sum()
+        # For cost, use all rows (not period-specific)
+        total_cost = df_work['cost'].sum()
         for day in DAY_COLUMNS:
-            if f'd{day}_total_net_revenue' in df.columns:
-                total_revenue = df[f'd{day}_total_net_revenue'].sum()
-                summary_row[f'd{day}_roas'] = total_revenue / total_cost if total_cost > 0 else 0
+            if f'd{day}_total_net_revenue' in df_work.columns:
+                # Only include rows where diff_from_today >= day (fully completed periods)
+                if diff_col:
+                    completed_df = df_work[df_work[diff_col] >= day]
+                else:
+                    completed_df = df_work  # Fallback to all rows if diff_from_today not available
+                
+                total_revenue = completed_df[f'd{day}_total_net_revenue'].sum()
+                completed_cost = completed_df['cost'].sum()
+                summary_row[f'd{day}_roas'] = total_revenue / completed_cost if completed_cost > 0 else 0
                 summary_row[f'd{day}_total_net_revenue'] = total_revenue
-        if 'ltv_total_net_revenue' in df.columns:
-            total_ltv_revenue = df['ltv_total_net_revenue'].sum()
+        # LTV metrics - always include all rows (LTV is always black)
+        if 'ltv_total_net_revenue' in df_work.columns:
+            total_ltv_revenue = df_work['ltv_total_net_revenue'].sum()
             summary_row['ltv_roas'] = total_ltv_revenue / total_cost if total_cost > 0 else 0
             summary_row['ltv_total_net_revenue'] = total_ltv_revenue
     
     elif table_type == 'ftds':
-        total_installs = df['installs'].sum()
+        # For installs, use all rows (not period-specific)
+        total_installs = df_work['installs'].sum()
         for day in DAY_COLUMNS:
-            if f'd{day}_ftds' in df.columns:
-                total_ftds = df[f'd{day}_ftds'].sum()
-                summary_row[f'd{day}_ftd_pct'] = (total_ftds / total_installs * 100) if total_installs > 0 else 0
+            if f'd{day}_ftds' in df_work.columns:
+                # Only include rows where diff_from_today >= day (fully completed periods)
+                if diff_col:
+                    completed_df = df_work[df_work[diff_col] >= day]
+                else:
+                    completed_df = df_work  # Fallback to all rows if diff_from_today not available
+                
+                total_ftds = completed_df[f'd{day}_ftds'].sum()
+                completed_installs = completed_df['installs'].sum()
+                summary_row[f'd{day}_ftd_pct'] = (total_ftds / completed_installs * 100) if completed_installs > 0 else 0
                 summary_row[f'd{day}_ftds'] = total_ftds
-        if 'ltv_ftds' in df.columns:
-            total_ltv_ftds = df['ltv_ftds'].sum()
+        # LTV metrics - always include all rows (LTV is always black)
+        if 'ltv_ftds' in df_work.columns:
+            total_ltv_ftds = df_work['ltv_ftds'].sum()
             summary_row['ltv_ftd_pct'] = (total_ltv_ftds / total_installs * 100) if total_installs > 0 else 0
             summary_row['ltv_ftds'] = total_ltv_ftds
     
     elif table_type == 'retention':
-        total_installs = df['installs'].sum()
+        # For installs, use all rows (not period-specific)
+        total_installs = df_work['installs'].sum()
         for day in DAY_COLUMNS:
-            if f'd{day}_ret' in df.columns:
-                total_ret = df[f'd{day}_ret'].sum()
-                summary_row[f'd{day}_ret_pct'] = (total_ret / total_installs * 100) if total_installs > 0 else 0
+            if f'd{day}_ret' in df_work.columns:
+                # Only include rows where diff_from_today >= day (fully completed periods)
+                if diff_col:
+                    completed_df = df_work[df_work[diff_col] >= day]
+                else:
+                    completed_df = df_work  # Fallback to all rows if diff_from_today not available
+                
+                total_ret = completed_df[f'd{day}_ret'].sum()
+                completed_installs = completed_df['installs'].sum()
+                summary_row[f'd{day}_ret_pct'] = (total_ret / completed_installs * 100) if completed_installs > 0 else 0
                 summary_row[f'd{day}_ret'] = total_ret
     
     elif table_type == 'payer_retention':
-        if 'payers' in df.columns:
-            summary_row['payers'] = df['payers'].sum()
-        total_payers = df['payers'].sum() if 'payers' in df.columns else 0
+        # Payers - always include all rows (not period-specific)
+        if 'payers' in df_work.columns:
+            summary_row['payers'] = df_work['payers'].sum()
+        total_payers = df_work['payers'].sum() if 'payers' in df_work.columns else 0
         for day in DAY_COLUMNS:
-            if f'd{day}_payers_retention' in df.columns:
-                total_payers_ret = df[f'd{day}_payers_retention'].sum()
-                summary_row[f'd{day}_payers_ret_pct'] = (total_payers_ret / total_payers * 100) if total_payers > 0 else 0
+            if f'd{day}_payers_retention' in df_work.columns:
+                # Only include rows where diff_from_today >= day (fully completed periods)
+                if diff_col:
+                    completed_df = df_work[df_work[diff_col] >= day]
+                else:
+                    completed_df = df_work  # Fallback to all rows if diff_from_today not available
+                
+                total_payers_ret = completed_df[f'd{day}_payers_retention'].sum()
+                completed_payers = completed_df['payers'].sum() if 'payers' in completed_df.columns else 0
+                summary_row[f'd{day}_payers_ret_pct'] = (total_payers_ret / completed_payers * 100) if completed_payers > 0 else 0
                 summary_row[f'd{day}_payers_retention'] = total_payers_ret
     
     elif table_type == 'cpa':
-        total_cost = df['cost'].sum()
         for day in DAY_COLUMNS:
-            if f'd{day}_ftds' in df.columns:
-                total_ftds = df[f'd{day}_ftds'].sum()
-                summary_row[f'd{day}_cpa'] = total_cost / total_ftds if total_ftds > 0 else 0
+            if f'd{day}_ftds' in df_work.columns:
+                # Only include rows where diff_from_today >= day (fully completed periods)
+                if diff_col:
+                    completed_df = df_work[df_work[diff_col] >= day]
+                else:
+                    completed_df = df_work  # Fallback to all rows if diff_from_today not available
+                
+                total_ftds = completed_df[f'd{day}_ftds'].sum()
+                completed_cost = completed_df['cost'].sum()
+                summary_row[f'd{day}_cpa'] = completed_cost / total_ftds if total_ftds > 0 else 0
                 # Don't include ftds in summary row display (it's just for calculation)
     
     # diff_from_today - use min
@@ -585,6 +656,50 @@ def add_summary_row(df, table_type, selected_dimensions):
     # Concatenate with original dataframe
     result_df = pd.concat([df, summary_df], ignore_index=True)
     return result_df
+
+def add_period_indicators(df):
+    """Add indicator columns for each period showing completion status"""
+    if df.empty or 'diff_from_today' not in df.columns:
+        return df
+    
+    df_with_indicators = df.copy()
+    
+    # Find all period columns (d0, d1, d3, etc.)
+    period_cols = []
+    for col in df.columns:
+        # Match d0_, d1_, d3_, etc. but not ltv_
+        if col.startswith('d') and '_' in col and not col.startswith('diff'):
+            day_match = col.split('_')[0]  # e.g., 'd3'
+            if day_match[1:].isdigit():  # Check if it's a number after 'd'
+                day_num = int(day_match[1:])
+                period_cols.append((day_num, col))
+    
+    # Sort by day number
+    period_cols.sort(key=lambda x: x[0])
+    
+    # Add indicator column for each unique period
+    seen_periods = set()
+    for day_num, col in period_cols:
+        if day_num not in seen_periods:
+            seen_periods.add(day_num)
+            indicator_col = f'd{day_num}_indicator'
+            
+            # Calculate completion status: complete if diff_from_today >= day_num
+            indicator_values = []
+            for idx, row in df_with_indicators.iterrows():
+                diff = row['diff_from_today']
+                if pd.isna(diff):
+                    indicator_values.append('○')  # Unknown
+                else:
+                    diff = float(diff)
+                    if diff >= day_num:
+                        indicator_values.append('●')  # Complete (black)
+                    else:
+                        indicator_values.append('○')  # Incomplete (gray)
+            
+            df_with_indicators[indicator_col] = indicator_values
+    
+    return df_with_indicators
 
 def reorder_columns(df, table_type, selected_dimensions):
     """Reorder columns according to specification"""
@@ -707,6 +822,72 @@ def format_dataframe(df, table_type):
     
     return display_df
 
+def style_period_cells(df, table_type):
+    """Apply conditional formatting: gray text on white background for incomplete periods, black for complete"""
+    import re
+    
+    # Check for numeric diff_from_today (either original or temporary column)
+    diff_col = None
+    if '_diff_from_today_numeric' in df.columns:
+        diff_col = '_diff_from_today_numeric'
+    elif 'diff_from_today' in df.columns:
+        # Check if it's numeric
+        try:
+            pd.to_numeric(df['diff_from_today'])
+            diff_col = 'diff_from_today'
+        except:
+            pass
+    
+    if df.empty or diff_col is None:
+        return df.style
+    
+    # Pattern to match day columns (d0, d1, d3, d7, etc.)
+    day_pattern = re.compile(r'^d(\d+)_')
+    
+    def style_row(row):
+        # Skip styling for summary row (last row) - it will be styled separately
+        if row.name == len(df) - 1:
+            return pd.Series([''] * len(df.columns), index=df.columns)
+        
+        diff = row.get(diff_col, 0)
+        if pd.isna(diff) or diff is None:
+            diff = 0
+        else:
+            try:
+                diff = float(diff)
+            except (ValueError, TypeError):
+                diff = 0
+        
+        styles = []
+        for col in df.columns:
+            # Skip diff_from_today and temporary columns
+            if col == 'diff_from_today' or col == '_diff_from_today_numeric':
+                styles.append('')
+                continue
+            
+            # LTV columns are always black
+            if col.startswith('ltv_'):
+                styles.append('color: #000000; background-color: transparent')
+                continue
+            
+            # Check if column matches day pattern
+            match = day_pattern.match(col)
+            if match:
+                day_val = int(match.group(1))
+                if diff < day_val:
+                    # Incomplete period - gray text on white background
+                    styles.append('color: #999999; background-color: #ffffff')
+                else:
+                    # Complete period - black text
+                    styles.append('color: #000000; background-color: transparent')
+            else:
+                # Other columns - always black
+                styles.append('color: #000000; background-color: transparent')
+        
+        return pd.Series(styles, index=df.columns)
+    
+    return df.style.apply(style_row, axis=1)
+
 def main():
     # Authentication check
     if is_oauth_configured():
@@ -738,11 +919,13 @@ def main():
             'is_test_campaign': False,  # Default: not test campaigns
         }
         st.session_state.add_rt_cost = False  # Default: false (will be managed by widget)
+        st.session_state.net_share_method = 'actual'  # Default: actual
         st.session_state.selected_dimensions = ['install_week']  # Default: install_week
         st.session_state.selected_table = 'roas'
         st.session_state.dashboard_initialized = True
         st.session_state.run_clicked = False  # Track if Run button has been clicked
         st.session_state.run_add_rt_cost = False  # Store the value when Run is clicked
+        st.session_state.run_net_share_method = 'actual'  # Store the value when Run is clicked
     
     # Sidebar with filters
     with st.sidebar:
@@ -842,6 +1025,17 @@ def main():
             help="Add the RT campaigns cost to the UA cost"
         )
         
+        # Net Share Method selection
+        st.markdown("---")
+        st.subheader("Net Share Settings")
+        net_share_method = st.radio(
+            "Net Share Method",
+            options=["actual", "fixed_15"],
+            index=0 if st.session_state.get('net_share_method', 'actual') == 'actual' else 1,
+            key="net_share_method",
+            help="Select net share calculation method: actual uses actual net share, fixed_15 uses 15% fixed net share"
+        )
+        
         # Dimension selection
         st.markdown("---")
         st.markdown("### Dimensions")
@@ -867,6 +1061,7 @@ def main():
         }
         # Store the checkbox value (read from widget's session_state)
         st.session_state.run_add_rt_cost = st.session_state.add_rt_cost
+        st.session_state.run_net_share_method = st.session_state.net_share_method
         st.session_state.selected_dimensions = selected_dimensions
         st.session_state.run_clicked = True  # Mark that Run has been clicked
         st.rerun()
@@ -879,6 +1074,7 @@ def main():
     # Use stored filters
     filters = st.session_state.run_filters
     add_rt_cost = st.session_state.run_add_rt_cost  # Use the stored value from Run button
+    net_share_method = st.session_state.run_net_share_method  # Use the stored value from Run button
     selected_dimensions = st.session_state.selected_dimensions
     
     # Table options
@@ -901,7 +1097,7 @@ def main():
             
             with st.spinner(f"Loading {table_name} data..."):
                 if table_key == 'roas':
-                    df = query_roas_table(client, filters_tuple, selected_dimensions_tuple, add_rt_cost)
+                    df = query_roas_table(client, filters_tuple, selected_dimensions_tuple, add_rt_cost, net_share_method)
                 elif table_key == 'ftds':
                     df = query_ftds_table(client, filters_tuple, selected_dimensions_tuple, add_rt_cost)
                 elif table_key == 'retention':
@@ -916,19 +1112,48 @@ def main():
             if df.empty:
                 st.info("No data found for the selected filters.")
             else:
-                # Add summary row (before formatting)
+                # Add summary row to the dataframe
                 df_with_summary = add_summary_row(df.copy(), table_key, selected_dimensions)
                 
                 # Reorder columns
                 df_reordered = reorder_columns(df_with_summary, table_key, selected_dimensions)
                 
-                # Format dataframe
+                
+                # Apply conditional formatting BEFORE formatting (need numeric diff_from_today)
+                # Create a copy for styling that keeps numeric values
+                df_for_styling = df_reordered.copy()
+                
+                # Format dataframe for display
                 display_df = format_dataframe(df_reordered, table_key)
                 
-                # Mark summary row (last row) as bold
-                # Calculate height: 10 data rows + 1 header + 1 summary = 12 rows total
-                # Each row ~35px, header ~40px, so total ~460px
-                table_height = 460  # Fixed height for 10 rows + header + summary
+                # Apply conditional formatting using pandas Styler
+                # We need to apply styles to the formatted dataframe but use diff_from_today from original
+                # So we'll apply styles directly to display_df but reference the numeric diff_from_today
+                if 'diff_from_today' in df_for_styling.columns:
+                    # Temporarily add numeric diff_from_today to display_df for styling
+                    display_df['_diff_from_today_numeric'] = df_for_styling['diff_from_today'].values
+                    styled_df = style_period_cells(display_df, table_key)
+                    # Remove the temporary column
+                    display_df = display_df.drop(columns=['_diff_from_today_numeric'], errors='ignore')
+                else:
+                    styled_df = display_df.style
+                
+                # Apply bold styling to summary row (last row) - skip conditional formatting for it
+                def style_summary_row(row):
+                    styles = []
+                    for col in display_df.columns:
+                        if row.name == len(display_df) - 1:  # Last row (summary)
+                            styles.append('font-weight: bold; background-color: #f0f2f6; color: #000000')
+                        else:
+                            styles.append('')
+                    return pd.Series(styles, index=display_df.columns)
+                
+                styled_df = styled_df.apply(style_summary_row, axis=1)
+                
+                # Set fixed table height for scrolling (show ~10 rows visible, but allow scrolling through all)
+                # Each row ~35px, header ~40px
+                # Show approximately 10 data rows in viewport
+                table_height = 40 + (10 * 35)  # header + ~10 visible rows
                 
                 # Identify frozen columns
                 frozen_cols = []
@@ -938,42 +1163,129 @@ def main():
                 frozen_cols.extend(['cost', 'installs', 'cpi', 'avg_daily_cost', 'avg_daily_installs'])
                 frozen_cols = [col for col in frozen_cols if col in display_df.columns]
                 
-                # Display table with fixed height for 10 rows
-                st.dataframe(
-                    display_df, 
-                    use_container_width=True, 
-                    height=table_height, 
-                    hide_index=True,
-                    column_config={
-                        col: st.column_config.Column(
-                            col,
-                            help=None
-                        ) for col in display_df.columns
-                    }
-                )
+                # Create unique identifier for this table
+                table_unique_id = f"table_{table_key}"
                 
-                # Add CSS for frozen columns and summary row styling
-                summary_row_idx = len(display_df) - 1
+                # Wrap dataframe in a div with unique ID for CSS targeting
+                st.markdown(f'<div id="{table_unique_id}">', unsafe_allow_html=True)
+                
+                # Generate CSS for each frozen column with proper left positioning
+                frozen_col_css = ""
+                left_pos = 0
+                for idx, col in enumerate(frozen_cols, 1):
+                    # Estimate column width (approximate)
+                    col_width = 120 if col in ['cost', 'installs', 'avg_daily_cost', 'avg_daily_installs'] else 100
+                    frozen_col_css += f"""
+                #{table_unique_id} div[data-testid="stDataFrame"] table thead th:nth-child({idx}) {{
+                    position: sticky !important;
+                    left: {left_pos}px !important;
+                    z-index: 25 !important;
+                    background-color: white !important;
+                }}
+                #{table_unique_id} div[data-testid="stDataFrame"] table tbody td:nth-child({idx}) {{
+                    position: sticky !important;
+                    left: {left_pos}px !important;
+                    z-index: 10 !important;
+                    background-color: white !important;
+                }}
+                """
+                    left_pos += col_width
+                
+                # Add shadow to the last frozen column
+                frozen_col_css += f"""
+                #{table_unique_id} div[data-testid="stDataFrame"] table thead th:nth-child({len(frozen_cols)}),
+                #{table_unique_id} div[data-testid="stDataFrame"] table tbody td:nth-child({len(frozen_cols)}) {{
+                    box-shadow: 2px 0px 5px rgba(0,0,0,0.1) !important;
+                }}
+                """
+                
+                # CSS for frozen columns and hide empty rows
                 st.markdown(f"""
                 <style>
-                /* Style summary row (last row) */
-                div[data-testid="stDataFrame"] table tbody tr:nth-child({summary_row_idx + 1}) {{
+                /* Target this specific table container */
+                #{table_unique_id} div[data-testid="stDataFrame"] {{
+                    position: relative !important;
+                }}
+                /* Find the scrollable container - Streamlit wraps tables in nested divs */
+                #{table_unique_id} div[data-testid="stDataFrame"] > div:first-child {{
+                    max-height: {table_height}px !important;
+                    overflow-y: auto !important;
+                    overflow-x: auto !important;
+                    position: relative !important;
+                    display: block !important;
+                }}
+                /* Ensure table structure supports sticky positioning */
+                #{table_unique_id} div[data-testid="stDataFrame"] table {{
+                    border-collapse: separate !important;
+                    border-spacing: 0 !important;
+                    width: 100% !important;
+                }}
+                /* Hide empty rows - target rows with no text content */
+                #{table_unique_id} div[data-testid="stDataFrame"] table tbody tr:empty {{
+                    display: none !important;
+                }}
+                /* Ensure our conditional formatting CSS has highest priority */
+                #{table_unique_id} div[data-testid="stDataFrame"] table tbody td {{
+                    /* Don't set color here - let JavaScript handle it */
+                }}
+                /* Sticky header - bold and black with gray background (same as summary row) */
+                #{table_unique_id} div[data-testid="stDataFrame"] table thead tr th {{
+                    position: sticky !important;
+                    top: 0 !important;
+                    z-index: 20 !important;
+                    background-color: #f0f2f6 !important;
+                    font-weight: bold !important;
+                    color: #000000 !important;
+                }}
+                /* Style summary row (last row) - make it sticky at bottom and bold */
+                #{table_unique_id} div[data-testid="stDataFrame"] table tbody tr:last-child {{
                     font-weight: bold !important;
                     background-color: #f0f2f6 !important;
                     position: sticky !important;
                     bottom: 0 !important;
-                    z-index: 10 !important;
+                    z-index: 15 !important;
                 }}
-                div[data-testid="stDataFrame"] table thead tr th {{
-                    position: sticky !important;
-                    top: 0 !important;
-                    z-index: 20 !important;
-                    background-color: white !important;
+                #{table_unique_id} div[data-testid="stDataFrame"] table tbody tr:last-child td {{
+                    background-color: #f0f2f6 !important;
+                    font-weight: bold !important;
+                    color: #000000 !important;
                 }}
+                /* IMPORTANT: CSS rules for conditional formatting - backup to JavaScript */
+                #{table_unique_id} div[data-testid="stDataFrame"] table tbody td[data-cf-color="gray"] {{
+                    color: #999999 !important;
+                    background-color: #ffffff !important;
+                }}
+                #{table_unique_id} div[data-testid="stDataFrame"] table tbody td[data-cf-color="black"] {{
+                    color: #000000 !important;
+                    background-color: transparent !important;
+                }}
+                /* Style indicator columns - will be enhanced by JavaScript */
+                {frozen_col_css}
                 </style>
                 """, unsafe_allow_html=True)
                 
-                # Download button (use original df without summary for CSV)
+                # Configure column display
+                column_config = {
+                    col: st.column_config.Column(
+                        col,
+                        help=None
+                    ) for col in display_df.columns
+                }
+                
+                # Display table with dynamic height and styling
+                st.dataframe(
+                    styled_df, 
+                    use_container_width=True, 
+                    height=table_height, 
+                    hide_index=True,
+                    column_config=column_config,
+                    key=f"df_{table_key}"
+                )
+                
+                # Close the wrapper div
+                st.markdown('</div>', unsafe_allow_html=True)
+                
+                # Download button
                 csv = df.to_csv(index=False)
                 st.download_button(
                     label=f"📥 Download {table_name} CSV",
