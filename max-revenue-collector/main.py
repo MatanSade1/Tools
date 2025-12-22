@@ -332,9 +332,9 @@ def parse_csv_response(csv_content: str, platform_name: str) -> List[Dict]:
                 "device_type": row.get("Device Type", ""),
                 "idfa": row.get("IDFA", ""),
                 "idfv": row.get("IDFV", ""),
-                "user_id": row.get("User Id", ""),  # Note: "User Id" with lowercase 'd'
+                "user_id": row.get("User ID", ""),  # Note: uppercase "ID"
                 "revenue": revenue,
-                "ad_placement": row.get("Ad Placement", ""),
+                "ad_placement": row.get("Ad placement", ""),  # Note: lowercase "placement"
                 "platform": platform_name
             }
             
