@@ -217,17 +217,57 @@ def create_singular_gdpr_request(distinct_id: str, property_id: Optional[str] = 
         "Authorization": api_key
     }
     
-    # OpenDSR request payload - Singular expects property_id and user_id at top level
-    payload = {
+    # OpenDSR request payload - Try different formats
+    # Format 1: Simple format (property_id and user_id)
+    payload_simple = {
         "property_id": property_id.strip(),
         "user_id": distinct_id.strip()
+    }
+    
+    # Format 2: With request_type (common in OpenDSR)
+    payload_with_type = {
+        "property_id": property_id.strip(),
+        "user_id": distinct_id.strip(),
+        "request_type": "deletion"
+    }
+    
+    # Format 3: Nested structure
+    payload_nested = {
+        "request": {
+            "property_id": property_id.strip(),
+            "user_id": distinct_id.strip()
+        }
     }
     
     try:
         # Debug: Print payload being sent
         print(f"   Sending payload: property_id={property_id}, user_id={distinct_id}")
         
-        response = requests.post(url, headers=headers, json=payload, timeout=30)
+        # Try format 1 first (simple)
+        import json as json_lib
+        json_data = json_lib.dumps(payload_simple)
+        print(f"   Trying format 1 (simple): {json_data}")
+        
+        response = requests.post(url, headers=headers, json=payload_simple, timeout=30)
+        
+        # If 400 error, try format 2
+        if response.status_code == 400:
+            error_text = response.text.lower()
+            if "missing or invalid json" in error_text or "invalid json body" in error_text:
+                print(f"   Format 1 failed, trying format 2 (with request_type)...")
+                json_data = json_lib.dumps(payload_with_type)
+                print(f"   Trying format 2: {json_data}")
+                response = requests.post(url, headers=headers, json=payload_with_type, timeout=30)
+                
+                # If still 400, try format 3
+                if response.status_code == 400:
+                    print(f"   Format 2 failed, trying format 3 (nested)...")
+                    json_data = json_lib.dumps(payload_nested)
+                    print(f"   Trying format 3: {json_data}")
+                    response = requests.post(url, headers=headers, json=payload_nested, timeout=30)
+                    if response.status_code in [200, 201]:
+                        payload_simple = payload_nested  # Use nested for result parsing
+        
         response.raise_for_status()
         
         result = response.json()
