@@ -1,7 +1,9 @@
 """API clients for Mixpanel and Singular GDPR deletion requests."""
 import os
+import uuid
 import requests
 from typing import Optional, Dict
+from datetime import datetime, timezone
 from shared.config import get_config
 
 
@@ -217,66 +219,39 @@ def create_singular_gdpr_request(distinct_id: str, property_id: Optional[str] = 
         "Authorization": api_key
     }
     
-    # OpenDSR request payload - Try different formats
-    # Format 1: Simple format (property_id and user_id)
-    payload_simple = {
-        "property_id": property_id.strip(),
-        "user_id": distinct_id.strip()
-    }
+    # OpenDSR request payload - Singular requires full OpenDSR format
+    subject_request_id = str(uuid.uuid4())
+    submitted_time = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
     
-    # Format 2: With request_type (common in OpenDSR)
-    payload_with_type = {
-        "property_id": property_id.strip(),
-        "user_id": distinct_id.strip(),
-        "request_type": "deletion"
-    }
-    
-    # Format 3: Nested structure
-    payload_nested = {
-        "request": {
-            "property_id": property_id.strip(),
-            "user_id": distinct_id.strip()
-        }
+    payload = {
+        "subject_request_id": subject_request_id,
+        "subject_request_type": "erasure",
+        "submitted_time": submitted_time,
+        "subject_identities": [
+            {
+                "identity_type": "user_id",
+                "identity_value": distinct_id.strip(),
+                "identity_format": "raw"
+            }
+        ],
+        "property_id": property_id.strip()
     }
     
     try:
         # Debug: Print payload being sent
-        print(f"   Sending payload: property_id={property_id}, user_id={distinct_id}")
+        print(f"   Sending OpenDSR payload: property_id={property_id}, user_id={distinct_id}")
+        print(f"   Subject request ID: {subject_request_id}")
         
-        # Try format 1 first (simple)
-        import json as json_lib
-        json_data = json_lib.dumps(payload_simple)
-        print(f"   Trying format 1 (simple): {json_data}")
-        
-        response = requests.post(url, headers=headers, json=payload_simple, timeout=30)
-        
-        # If 400 error, try format 2
-        if response.status_code == 400:
-            error_text = response.text.lower()
-            if "missing or invalid json" in error_text or "invalid json body" in error_text:
-                print(f"   Format 1 failed, trying format 2 (with request_type)...")
-                json_data = json_lib.dumps(payload_with_type)
-                print(f"   Trying format 2: {json_data}")
-                response = requests.post(url, headers=headers, json=payload_with_type, timeout=30)
-                
-                # If still 400, try format 3
-                if response.status_code == 400:
-                    print(f"   Format 2 failed, trying format 3 (nested)...")
-                    json_data = json_lib.dumps(payload_nested)
-                    print(f"   Trying format 3: {json_data}")
-                    response = requests.post(url, headers=headers, json=payload_nested, timeout=30)
-                    if response.status_code in [200, 201]:
-                        payload_simple = payload_nested  # Use nested for result parsing
-        
+        response = requests.post(url, headers=headers, json=payload, timeout=30)
         response.raise_for_status()
         
         result = response.json()
-        # Singular returns subject_request_id in the response
-        subject_request_id = result.get("subject_request_id") or result.get("request_id")
+        # Singular returns the subject_request_id we sent (or may return it in response)
+        returned_request_id = result.get("subject_request_id") or subject_request_id
         
-        if subject_request_id:
-            print(f"✅ Created Singular GDPR request for {distinct_id}: {subject_request_id}")
-            return str(subject_request_id)
+        if returned_request_id:
+            print(f"✅ Created Singular GDPR request for {distinct_id}: {returned_request_id}")
+            return str(returned_request_id)
         else:
             print(f"⚠️  Singular GDPR request created but no subject_request_id in response: {result}")
             return None
