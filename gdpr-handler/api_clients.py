@@ -145,39 +145,89 @@ def create_mixpanel_gdpr_request(distinct_id: str, compliance_type: str = "gdpr"
         return None
 
 
-def create_singular_gdpr_request(distinct_id: str) -> Optional[str]:
+def create_singular_gdpr_request(distinct_id: str, property_id: Optional[str] = None) -> Optional[str]:
     """
     Create a GDPR deletion request in Singular using OpenDSR API.
     
     Args:
         distinct_id: The user's distinct_id (used as user_id in Singular)
+        property_id: Optional property_id (e.g., "Android:com.peerplay.megamerge" or "iOS:com.peerplay.game")
+                   If not provided, will try to fetch from dim_player based on last_platform
     
     Returns:
         subject_request_id if successful, None otherwise
     """
     config = get_config()
-    api_key = config.get("singular_api_key")
-    api_secret = config.get("singular_api_secret")
+    api_key = config.get("singular_api_key") or config.get("singular_api_secret")
     
-    if not api_key or not api_secret:
-        raise ValueError("SINGULAR_API_KEY and SINGULAR_API_SECRET (or their _NAME variants) must be configured")
+    if not api_key:
+        raise ValueError("SINGULAR_API_KEY (or SINGULAR_API_SECRET) must be configured")
     
-    # Singular OpenDSR API endpoint
-    url = "https://api.singular.net/api/v1/opendsr"
+    # If property_id not provided, try to fetch from dim_player
+    if not property_id:
+        try:
+            from shared.bigquery_client import get_bigquery_client
+            client = get_bigquery_client()
+            query = f"""
+            SELECT last_platform
+            FROM `peerplay.dim_player`
+            WHERE distinct_id = @distinct_id
+            LIMIT 1
+            """
+            from google.cloud import bigquery
+            job_config = bigquery.QueryJobConfig(
+                query_parameters=[
+                    bigquery.ScalarQueryParameter("distinct_id", "STRING", distinct_id),
+                ]
+            )
+            results = client.query(query, job_config=job_config).result()
+            row = next(results, None)
+            if row and row.last_platform:
+                platform = row.last_platform
+                # Map platform to property_id
+                if platform.lower() in ["android", "google"]:
+                    property_id = "Android:com.peerplay.megamerge"
+                elif platform.lower() in ["ios", "apple"]:
+                    property_id = "iOS:com.peerplay.game"
+                else:
+                    print(f"⚠️  Unknown platform '{platform}', defaulting to Android")
+                    property_id = "Android:com.peerplay.megamerge"
+            else:
+                print(f"⚠️  No platform found for user {distinct_id}, defaulting to Android")
+                property_id = "Android:com.peerplay.megamerge"
+        except Exception as e:
+            print(f"⚠️  Error fetching platform for {distinct_id}: {e}, defaulting to Android")
+            property_id = "Android:com.peerplay.megamerge"
     
-    # Singular uses Basic Auth with API key and secret
-    auth = (api_key, api_secret)
+    if property_id:
+        print(f"📱 Detected platform: {property_id.split(':')[0]} → Using property_id: {property_id}")
     
-    # OpenDSR request payload
+    # Validate inputs
+    if not property_id or not property_id.strip():
+        raise ValueError("property_id cannot be empty")
+    if not distinct_id or not distinct_id.strip():
+        raise ValueError("distinct_id cannot be empty")
+    
+    # Singular GDPR API endpoint
+    url = "https://gdpr.singular.net/api/gdpr/requests"
+    
+    # Singular uses API key directly in Authorization header (not Bearer token)
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": api_key
+    }
+    
+    # OpenDSR request payload - Singular expects property_id and user_id at top level
     payload = {
-        "request_type": "deletion",
-        "regulation": "gdpr",
-        "user_id": distinct_id,
-        "user_id_type": "custom"
+        "property_id": property_id.strip(),
+        "user_id": distinct_id.strip()
     }
     
     try:
-        response = requests.post(url, auth=auth, json=payload, timeout=30)
+        # Debug: Print payload being sent
+        print(f"   Sending payload: property_id={property_id}, user_id={distinct_id}")
+        
+        response = requests.post(url, headers=headers, json=payload, timeout=30)
         response.raise_for_status()
         
         result = response.json()
@@ -197,7 +247,105 @@ def create_singular_gdpr_request(distinct_id: str) -> Optional[str]:
             try:
                 error_detail = e.response.json()
                 print(f"   Error details: {error_detail}")
+                # Print full response for debugging
+                print(f"   Response status: {e.response.status_code}")
+                print(f"   Response headers: {dict(e.response.headers)}")
             except:
-                print(f"   Response: {e.response.text}")
+                print(f"   Response text: {e.response.text[:500]}")
+                print(f"   Response status: {e.response.status_code}")
+        return None
+
+
+def check_mixpanel_gdpr_status(task_id: str) -> Optional[str]:
+    """
+    Check the status of a Mixpanel GDPR deletion request.
+    
+    Args:
+        task_id: The task_id returned when creating the deletion request
+    
+    Returns:
+        "completed" or "pending" if successful, None otherwise
+    """
+    config = get_config()
+    oauth_token = config.get("mixpanel_gdpr_token")
+    project_token = os.getenv("MIXPANEL_PROJECT_TOKEN") or config.get("mixpanel_project_id")
+    
+    if not project_token:
+        project_token = "0e73d8fa8567c5bf2820b408701fa7be"  # Default project token
+    
+    if not oauth_token:
+        print("⚠️  MIXPANEL_GDPR_TOKEN not configured, cannot check status")
+        return None
+    
+    url = f"https://mixpanel.com/api/app/data-deletions/v3.0/{task_id}?token={project_token}"
+    headers = {"Authorization": f"Bearer {oauth_token}"}
+    
+    try:
+        response = requests.get(url, headers=headers, timeout=30)
+        response.raise_for_status()
+        result = response.json()
+        
+        # Extract status from response - Mixpanel returns status in results.status
+        results_data = result.get("results", {})
+        status = results_data.get("status") or result.get("status")
+        
+        # Normalize to lowercase for comparison
+        status_lower = str(status).lower() if status else None
+        
+        # Check if completed - Mixpanel returns "SUCCESS" (uppercase) when completed
+        if status_lower in ["completed", "success", "done"] or status == "SUCCESS":
+            return "completed"
+        elif status_lower in ["pending", "in_progress", "processing"]:
+            return "pending"
+        else:
+            print(f"⚠️  Unknown Mixpanel status: {status}")
+            return "pending"
+            
+    except requests.exceptions.RequestException as e:
+        print(f"❌ Error checking Mixpanel status for {task_id}: {e}")
+        return None
+
+
+def check_singular_gdpr_status(subject_request_id: str) -> Optional[str]:
+    """
+    Check the status of a Singular GDPR deletion request.
+    
+    Args:
+        subject_request_id: The subject_request_id returned when creating the deletion request
+    
+    Returns:
+        "completed" or "pending" if successful, None otherwise
+    """
+    config = get_config()
+    api_key = config.get("singular_api_key") or config.get("singular_api_secret")
+    
+    if not api_key:
+        print("⚠️  SINGULAR_API_KEY not configured, cannot check status")
+        return None
+    
+    url = f"https://gdpr.singular.net/api/gdpr/requests/{subject_request_id}"
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": api_key
+    }
+    
+    try:
+        response = requests.get(url, headers=headers, timeout=30)
+        response.raise_for_status()
+        result = response.json()
+        
+        # Extract status from response
+        status = result.get("status") or result.get("request_status")
+        
+        if status in ["completed", "success", "done", "fulfilled"]:
+            return "completed"
+        elif status in ["pending", "in_progress", "processing", "received"]:
+            return "pending"
+        else:
+            print(f"⚠️  Unknown Singular status: {status}")
+            return "pending"
+            
+    except requests.exceptions.RequestException as e:
+        print(f"❌ Error checking Singular status for {subject_request_id}: {e}")
         return None
 
