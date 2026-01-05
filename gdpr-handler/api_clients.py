@@ -190,7 +190,7 @@ def create_singular_gdpr_request(distinct_id: str, property_id: Optional[str] = 
                 if platform.lower() in ["android", "google"]:
                     property_id = "Android:com.peerplay.megamerge"
                 elif platform.lower() in ["ios", "apple"]:
-                    property_id = "iOS:com.peerplay.game"
+                    property_id = "iOS:com.peerplay.megamerge"
                 else:
                     print(f"⚠️  Unknown platform '{platform}', defaulting to Android")
                     property_id = "Android:com.peerplay.megamerge"
@@ -200,6 +200,10 @@ def create_singular_gdpr_request(distinct_id: str, property_id: Optional[str] = 
         except Exception as e:
             print(f"⚠️  Error fetching platform for {distinct_id}: {e}, defaulting to Android")
             property_id = "Android:com.peerplay.megamerge"
+    
+    # If property_id still not set, default to Android
+    if not property_id:
+        property_id = "Android:com.peerplay.megamerge"
     
     if property_id:
         print(f"📱 Detected platform: {property_id.split(':')[0]} → Using property_id: {property_id}")
