@@ -123,8 +123,8 @@ def delete_existing_data(client: bigquery.Client, start_date: str, end_date: str
     # Delete query - uses partition pruning on date column
     delete_query = f"""
     DELETE FROM `{project}.{dataset}.{table}`
-    WHERE DATE(date) >= '{start_date}'
-      AND DATE(date) <= '{end_date}'
+    WHERE date >= '{start_date}'
+      AND date <= '{end_date}'
     """
     
     logger.info(f"Deleting data from {start_date} to {end_date}")
@@ -290,9 +290,10 @@ def parse_csv_response(csv_content: str, platform_name: str) -> List[Dict]:
     
     for row in reader:
         try:
-            # Handle the date field
+            # Handle the date/timestamp field
             # MAX API uses "Date" column with format like "2019-07-29 15:53:07.39"
             date_str = row.get("Date", "")
+            timestamp_value = None
             date_value = None
             
             if date_str:
@@ -304,14 +305,17 @@ def parse_csv_response(csv_content: str, platform_name: str) -> List[Dict]:
                         ms_part = date_str.split(".")[1]
                         ms_part = ms_part.ljust(6, '0')[:6]
                         dt = dt.replace(microsecond=int(ms_part))
-                    date_value = dt.isoformat()
+                    timestamp_value = dt.isoformat()
+                    date_value = dt.strftime("%Y-%m-%d")  # YYYY-MM-DD format
                 except ValueError:
                     try:
                         # Try date only format
                         dt = datetime.strptime(date_str[:10], "%Y-%m-%d")
-                        date_value = dt.isoformat()
+                        timestamp_value = dt.isoformat()
+                        date_value = dt.strftime("%Y-%m-%d")
                     except ValueError:
                         logger.warning(f"Could not parse date: {date_str}")
+                        timestamp_value = None
                         date_value = None
             
             # Parse revenue as float
@@ -321,25 +325,33 @@ def parse_csv_response(csv_content: str, platform_name: str) -> List[Dict]:
             except ValueError:
                 revenue = 0.0
             
+            # Map platform name: ios -> Apple, android -> Android
+            platform_display = "Apple" if platform_name.lower() == "ios" else "Android"
+            
+            # Get country and uppercase it
+            country_value = row.get("Country", "")
+            country_upper = country_value.upper() if country_value else ""
+            
             record = {
+                "timestamp": timestamp_value,
                 "date": date_value,
                 "ad_unit_id": row.get("Ad Unit ID", ""),
                 "ad_unit_name": row.get("Ad Unit Name", ""),
                 "waterfall": row.get("Waterfall", ""),
                 "ad_format": row.get("Ad Format", ""),
                 "placement": row.get("Placement", ""),
-                "country": row.get("Country", ""),
+                "country": country_upper,
                 "device_type": row.get("Device Type", ""),
                 "idfa": row.get("IDFA", ""),
                 "idfv": row.get("IDFV", ""),
                 "user_id": row.get("User ID", ""),  # Note: uppercase "ID"
                 "revenue": revenue,
                 "ad_placement": row.get("Ad placement", ""),  # Note: lowercase "placement"
-                "platform": platform_name
+                "platform": platform_display
             }
             
             # Only add records with valid dates
-            if date_value:
+            if timestamp_value and date_value:
                 records.append(record)
             else:
                 logger.warning(f"Skipping record with invalid/missing date: {row}")
@@ -383,7 +395,8 @@ def ensure_table_exists(client: bigquery.Client):
     
     # Create table with schema and partitioning
     schema = [
-        bigquery.SchemaField("date", "TIMESTAMP", mode="REQUIRED"),
+        bigquery.SchemaField("timestamp", "TIMESTAMP", mode="REQUIRED"),
+        bigquery.SchemaField("date", "DATE", mode="REQUIRED"),
         bigquery.SchemaField("ad_unit_id", "STRING", mode="NULLABLE"),
         bigquery.SchemaField("ad_unit_name", "STRING", mode="NULLABLE"),
         bigquery.SchemaField("waterfall", "STRING", mode="NULLABLE"),
@@ -401,7 +414,7 @@ def ensure_table_exists(client: bigquery.Client):
     
     table = bigquery.Table(table_ref, schema=schema)
     
-    # Configure day partitioning on date column
+    # Configure day partitioning on date column (DATE type)
     table.time_partitioning = bigquery.TimePartitioning(
         type_=bigquery.TimePartitioningType.DAY,
         field="date"
@@ -413,10 +426,17 @@ def ensure_table_exists(client: bigquery.Client):
 
 def insert_records(client: bigquery.Client, records: List[Dict]) -> int:
     """
-    Insert records into BigQuery using streaming inserts.
+    Insert records into BigQuery using batch load jobs (not streaming).
+    
+    Benefits over streaming inserts:
+    - No streaming buffer (DELETE works immediately)
+    - Free (no insertion costs)
+    - Atomic (all or nothing)
     
     Returns the number of records inserted.
     """
+    import json as json_module
+    
     if not records:
         logger.info("No records to insert")
         return 0
@@ -424,41 +444,45 @@ def insert_records(client: bigquery.Client, records: List[Dict]) -> int:
     # Ensure table exists
     ensure_table_exists(client)
     
-    # Prepare rows for insertion (remove platform field as it's not in the table)
-    rows_to_insert = []
-    for record in records:
-        row = {k: v for k, v in record.items() if k != "platform"}
-        rows_to_insert.append(row)
+    # Prepare rows for insertion
+    rows_to_insert = list(records)
     
-    # Insert in batches (BigQuery streaming insert limit is 10000 rows per request)
-    batch_size = 5000
-    total_inserted = 0
-    errors_list = []
+    logger.info(f"Loading {len(rows_to_insert)} records using batch load job...")
     
-    for i in range(0, len(rows_to_insert), batch_size):
-        batch = rows_to_insert[i:i + batch_size]
-        batch_num = i // batch_size + 1
-        total_batches = (len(rows_to_insert) + batch_size - 1) // batch_size
-        
-        logger.info(f"Inserting batch {batch_num}/{total_batches} ({len(batch)} records)")
-        
-        table_parts = BIGQUERY_TABLE.split(".")
-        table_ref = client.dataset(table_parts[1], project=table_parts[0]).table(table_parts[2])
-        
-        errors = client.insert_rows_json(table_ref, batch)
-        
-        if errors:
-            logger.error(f"Errors inserting batch {batch_num}: {errors[:5]}")  # Log first 5 errors
-            errors_list.extend(errors)
-        else:
-            total_inserted += len(batch)
+    # Convert records to newline-delimited JSON
+    ndjson_data = "\n".join(json_module.dumps(row) for row in rows_to_insert)
     
-    if errors_list:
-        logger.warning(f"Completed with {len(errors_list)} errors. Successfully inserted {total_inserted} records.")
-    else:
-        logger.info(f"Successfully inserted {total_inserted} records")
+    # Create a file-like object from the JSON data
+    json_bytes = ndjson_data.encode("utf-8")
+    json_file = io.BytesIO(json_bytes)
     
-    return total_inserted
+    # Configure the load job
+    table_parts = BIGQUERY_TABLE.split(".")
+    table_ref = client.dataset(table_parts[1], project=table_parts[0]).table(table_parts[2])
+    
+    job_config = bigquery.LoadJobConfig(
+        source_format=bigquery.SourceFormat.NEWLINE_DELIMITED_JSON,
+        write_disposition=bigquery.WriteDisposition.WRITE_APPEND,
+    )
+    
+    # Load data from the in-memory file
+    load_job = client.load_table_from_file(
+        json_file,
+        table_ref,
+        job_config=job_config
+    )
+    
+    # Wait for the job to complete
+    logger.info(f"Load job started: {load_job.job_id}")
+    load_job.result()  # Waits for job to complete
+    
+    # Check for errors
+    if load_job.errors:
+        logger.error(f"Load job completed with errors: {load_job.errors}")
+        raise Exception(f"Load job failed: {load_job.errors}")
+    
+    logger.info(f"Successfully loaded {load_job.output_rows} records")
+    return load_job.output_rows or len(rows_to_insert)
 
 
 def run_collection() -> Dict:
@@ -608,6 +632,141 @@ def handle_request():
 def health_check():
     """Health check endpoint for Cloud Run."""
     return jsonify({"status": "healthy"}), 200
+
+
+@app.route("/backfill", methods=["GET", "POST"])
+def backfill():
+    """
+    Backfill endpoint for running collection on custom date ranges.
+    
+    Query parameters:
+    - start_date: Start date in YYYY-MM-DD format (required)
+    - end_date: End date in YYYY-MM-DD format (required)
+    - skip_delete: If 'true', skip deleting existing data (optional, default: false)
+    
+    Example: /backfill?start_date=2026-01-05&end_date=2026-01-10
+    """
+    logger.info(f"Received backfill request: {request.method}")
+    
+    # Get date parameters
+    start_date = request.args.get('start_date')
+    end_date = request.args.get('end_date')
+    skip_delete = request.args.get('skip_delete', 'false').lower() == 'true'
+    
+    # Validate parameters
+    if not start_date or not end_date:
+        return jsonify({
+            "status": "error",
+            "error": "Missing required parameters: start_date and end_date",
+            "usage": "/backfill?start_date=YYYY-MM-DD&end_date=YYYY-MM-DD"
+        }), 400
+    
+    # Validate date format
+    try:
+        datetime.strptime(start_date, "%Y-%m-%d")
+        datetime.strptime(end_date, "%Y-%m-%d")
+    except ValueError:
+        return jsonify({
+            "status": "error",
+            "error": "Invalid date format. Use YYYY-MM-DD",
+            "start_date": start_date,
+            "end_date": end_date
+        }), 400
+    
+    # Validate date range
+    if start_date > end_date:
+        return jsonify({
+            "status": "error",
+            "error": "start_date must be before or equal to end_date"
+        }), 400
+    
+    logger.info(f"Backfill date range: {start_date} to {end_date}")
+    
+    start_time = datetime.utcnow()
+    
+    try:
+        # Get API key
+        api_key = get_api_key()
+        
+        # Get BigQuery client
+        bq_client = get_bigquery_client()
+        
+        # Ensure table exists
+        ensure_table_exists(bq_client)
+        
+        # Delete existing data (unless skipped)
+        rows_deleted = 0
+        if not skip_delete:
+            logger.info(f"Deleting existing data for {start_date} to {end_date}")
+            rows_deleted = delete_existing_data(bq_client, start_date, end_date)
+        else:
+            logger.info("Skipping delete (skip_delete=true)")
+        
+        # Fetch data from MAX API for both platforms
+        all_records = []
+        platform_stats = {}
+        
+        for platform_config in PLATFORMS:
+            platform_name = platform_config["name"]
+            logger.info(f"Fetching {platform_name.upper()} data for backfill")
+            
+            try:
+                records = fetch_max_api_data(
+                    api_key=api_key,
+                    platform_config=platform_config,
+                    start_date=start_date,
+                    end_date=end_date
+                )
+                all_records.extend(records)
+                platform_stats[platform_name] = {
+                    "records_fetched": len(records),
+                    "status": "success"
+                }
+            except Exception as e:
+                logger.error(f"Failed to fetch {platform_name} data: {e}")
+                platform_stats[platform_name] = {
+                    "records_fetched": 0,
+                    "status": "error",
+                    "error": str(e)
+                }
+        
+        # Insert records into BigQuery
+        rows_inserted = insert_records(bq_client, all_records)
+        
+        # Calculate duration
+        end_time = datetime.utcnow()
+        duration_seconds = (end_time - start_time).total_seconds()
+        
+        result = {
+            "status": "success",
+            "operation": "backfill",
+            "timestamp": start_time.isoformat(),
+            "date_range": {
+                "start": start_date,
+                "end": end_date
+            },
+            "rows_deleted": rows_deleted,
+            "rows_inserted": rows_inserted,
+            "total_records_fetched": len(all_records),
+            "platform_stats": platform_stats,
+            "duration_seconds": duration_seconds
+        }
+        
+        logger.info(f"Backfill completed: {rows_inserted} rows inserted")
+        return jsonify(result), 200
+        
+    except Exception as e:
+        end_time = datetime.utcnow()
+        duration_seconds = (end_time - start_time).total_seconds()
+        
+        logger.exception(f"Backfill failed: {e}")
+        return jsonify({
+            "status": "error",
+            "operation": "backfill",
+            "error": str(e),
+            "error_type": type(e).__name__,
+            "duration_seconds": duration_seconds
+        }), 500
 
 
 @app.route("/test", methods=["GET"])

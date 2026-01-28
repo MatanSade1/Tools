@@ -2,7 +2,7 @@
 import os
 import uuid
 import requests
-from typing import Optional, Dict
+from typing import Optional, Dict, List
 from datetime import datetime, timezone
 from shared.config import get_config
 
@@ -366,5 +366,89 @@ def check_singular_gdpr_status(subject_request_id: str) -> Optional[str]:
             
     except requests.exceptions.RequestException as e:
         print(f"❌ Error checking Singular status for {subject_request_id}: {e}")
+        return None
+
+
+def create_applovin_gdpr_request(advertising_ids: List[str]) -> Optional[int]:
+    """
+    Create GDPR deletion request in AppLovin Max mediation.
+    
+    AppLovin API accepts a batch of advertising IDs (IDFA or GAID) in a single request.
+    The request body should be newline-separated list of UUIDs.
+    
+    Args:
+        advertising_ids: List of IDFA (iOS) or GAID (Android) in UUID format
+    
+    Returns:
+        Number of successfully deleted IDs (num_deleted_ids or num_valid_ids from response), or None if failed
+    """
+    config = get_config()
+    api_key = config.get("applovin_gdpr_api_key")
+    
+    if not api_key:
+        raise ValueError("APPLOVIN_GDPR_API_KEY must be configured in Secret Manager")
+    
+    if not advertising_ids:
+        print("⚠️  No advertising IDs provided for AppLovin deletion")
+        return None
+    
+    # Filter out None/empty values and validate UUID format
+    valid_ids = []
+    for ad_id in advertising_ids:
+        if ad_id and ad_id.strip():
+            # Basic UUID format validation (8-4-4-4-12 hex digits)
+            stripped = ad_id.strip()
+            if len(stripped) == 36 and stripped.count('-') == 4:
+                valid_ids.append(stripped)
+            else:
+                print(f"⚠️  Invalid UUID format for advertising ID: {ad_id}")
+    
+    if not valid_ids:
+        print("⚠️  No valid advertising IDs found for AppLovin deletion")
+        return None
+    
+    # AppLovin GDPR API endpoint
+    url = "https://api.applovin.com/gdpr/delete"
+    
+    # Query parameter: api_keys (comma-separated, but we have a single key)
+    params = {
+        "api_keys": api_key
+    }
+    
+    # Request body: newline-separated list of advertising IDs
+    request_body = "\n".join(valid_ids)
+    
+    try:
+        print(f"   Sending {len(valid_ids)} advertising IDs to AppLovin for deletion...")
+        
+        response = requests.post(
+            url,
+            params=params,
+            data=request_body,
+            headers={"Content-Type": "text/plain"},
+            timeout=30
+        )
+        response.raise_for_status()
+        
+        result = response.json()
+        # AppLovin API returns either num_valid_ids or num_deleted_ids
+        num_deleted = result.get("num_deleted_ids") or result.get("num_valid_ids")
+        
+        if num_deleted is not None:
+            print(f"✅ AppLovin deletion request processed: {num_deleted} IDs deleted")
+            return int(num_deleted)
+        else:
+            print(f"⚠️  AppLovin deletion request completed but no num_deleted_ids/num_valid_ids in response: {result}")
+            return None
+            
+    except requests.exceptions.RequestException as e:
+        print(f"❌ Error creating AppLovin GDPR deletion request: {e}")
+        if hasattr(e, 'response') and e.response is not None:
+            try:
+                error_detail = e.response.json()
+                print(f"   Error details: {error_detail}")
+            except:
+                print(f"   Response text: {e.response.text[:500]}")
+                print(f"   Response status: {e.response.status_code}")
         return None
 

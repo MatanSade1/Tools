@@ -43,6 +43,11 @@ fi
 export GCP_PROJECT_ID="${GCP_PROJECT_ID:-yotam-395120}"
 export PYTHONPATH=/Users/matansade/Tools:$PYTHONPATH
 
+# AppLovin GDPR API Key (can also be set via APPLOVIN_GDPR_API_KEY_NAME for Secret Manager)
+if [ -z "$APPLOVIN_GDPR_API_KEY" ] && [ -z "$APPLOVIN_GDPR_API_KEY_NAME" ]; then
+    export APPLOVIN_GDPR_API_KEY="hDzo5Mpi16NVLw63p6aHxytQoPbKza2NumUcK_GRkdPbCBZOPmTmf0qtsZ06Xb1REcLirNWAEFyTQSzWtP_JTW"
+fi
+
 # Add gcloud to PATH if it exists
 if [ -d "/Users/matansade/google-cloud-sdk/bin" ]; then
     export PATH="/Users/matansade/google-cloud-sdk/bin:$PATH"

@@ -1,0 +1,60 @@
+================================================================================
+NOTION OAUTH - QUICK START GUIDE
+================================================================================
+
+🎯 GOAL: Extract ALL calendar entries (2026-01-01 to 2026-02-28) from Notion
+         and upload to BigQuery table: yotam-395120.peerplay.liveops_calendar_test_2
+
+📋 WHAT YOU NEED TO DO:
+
+1. Create Notion Integration
+   → Go to: https://www.notion.so/my-integrations
+   → Click: "+ New integration"
+   → Type: PUBLIC (important!)
+   → Redirect URI: http://localhost:8080/oauth/callback
+   → Copy: OAuth Client ID and OAuth Client Secret
+
+2. Set Credentials
+   → Run in terminal:
+     export NOTION_CLIENT_ID='paste-your-client-id'
+     export NOTION_CLIENT_SECRET='paste-your-client-secret'
+
+3. Run the Setup
+   → Option A (Automated):
+     cd /Users/matansade/Tools
+     ./setup_notion_oauth.sh
+
+   → Option B (Manual):
+     python3 notion_oauth_flow.py      # Authorize in browser
+     python3 fetch_notion_oauth.py     # Fetch and upload data
+
+================================================================================
+
+✅ BENEFITS OF OAUTH METHOD:
+   - Deterministic (gets 100% of entries)
+   - Uses official Notion database query API
+   - Handles pagination automatically
+   - No missed entries (unlike semantic search)
+
+================================================================================
+
+📁 FILES CREATED:
+   - notion_oauth_flow.py       → OAuth authorization script
+   - fetch_notion_oauth.py      → Data fetching and upload script
+   - setup_notion_oauth.sh      → Automated setup helper
+   - OAUTH_README.md            → Detailed documentation
+   - QUICK_START.txt            → This file
+
+================================================================================
+
+🆘 NEED HELP?
+   Read: OAUTH_README.md for detailed step-by-step guide
+
+🔐 SECURITY:
+   - Keep OAuth credentials private
+   - Access token saved to: notion_token.json (don't commit to git)
+   - Can revoke access anytime at https://www.notion.so/my-integrations
+
+================================================================================
+
+Ready? Start with Step 1 above! 🚀

@@ -51,17 +51,6 @@ class ValidationRunner:
                 "output_dir": "data",
                 "logs_dir": "logs",
                 "exclude_parameters": [
-                    "res_timestamp",
-                    "time",
-                    "timestamp_client",
-                    "timestamp_source",
-                    "mp_mp_api_timestamp_ms",
-                    "mp_processing_time_ms",
-                    "distinct_id",
-                    "user_id",
-                    "device_id",
-                    "gaid",
-                    "mp_distinct_id_before_identity",
                     "entity_id",
                     "exception_message",
                     "res_constraint",
@@ -72,9 +61,11 @@ class ValidationRunner:
                     "inner_exception_name",
                     "exception",
                     "files_count",
-                    "race_request_board_level",
-                    "race_request_board_cycle",
-                    "failure_description_message"
+                    "failure_description_message",
+                    "published_by",
+                    "is_personal_offer_string",
+                    "interrupted_string",
+                    "mp_mp_event_size"
                 ]
             },
             "analysis": {
@@ -137,7 +128,7 @@ class ValidationRunner:
             logging.error(f"Data extraction failed: {e}")
             return False
     
-    def run_validation(self, exclude_parameters: list = None, include_parameters: list = None) -> bool:
+    def run_validation(self, exclude_parameters: list = None, include_parameters: list = None, old_version: str = None, new_version: str = None, start_date: str = None, end_date: str = None, sample_size: int = None) -> bool:
         """Run validation comparison."""
         try:
             from compare_validate import ComparativeValidator
@@ -156,7 +147,12 @@ class ValidationRunner:
                 str(new_csv),
                 chunk_size=self.config["validation"]["chunk_size"],
                 exclude_parameters=exclude_parameters,
-                include_parameters=include_parameters
+                include_parameters=include_parameters,
+                old_version=old_version,
+                new_version=new_version,
+                start_date=start_date,
+                end_date=end_date,
+                sample_size=sample_size
             )
             
             # Run validation
@@ -688,7 +684,15 @@ def main():
         if include_params:
             logging.info(f"Including only {len(include_params)} parameters: {', '.join(sorted(include_params))}")
         
-        success = runner.run_validation(exclude_parameters=all_exclusions, include_parameters=include_params)
+        success = runner.run_validation(
+            sample_size=args.sample_size,
+            exclude_parameters=all_exclusions,
+            include_parameters=include_params,
+            old_version=args.old_version,
+            new_version=args.new_version,
+            start_date=args.start_date,
+            end_date=args.end_date
+        )
         if not success:
             return 1
     

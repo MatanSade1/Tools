@@ -1,6 +1,7 @@
 """Cloud Function for RT Mixpanel event collection and alerting."""
 import os
 import json
+import logging
 import requests
 import base64
 from datetime import datetime, timedelta
@@ -37,8 +38,8 @@ def rt_mp_collector(request):
                 )
                 print(f"Configuration loaded from Google Sheets: {len(rt_config.get('events', []))} events configured")
             except Exception as e:
-                print(f"Warning: Failed to read config from Google Sheets: {e}")
-                print("Falling back to existing config file")
+                logging.warning(f"Failed to read config from Google Sheets: {e}")
+                logging.warning("Falling back to existing config file")
                 rt_config = get_rt_mp_config()
         else:
             # Use existing config file
@@ -50,7 +51,7 @@ def rt_mp_collector(request):
         if not config["mixpanel_project_id"]:
             raise ValueError("MIXPANEL_PROJECT_ID not configured")
         if not config.get("slack_webhook_url"):
-            print("Warning: SLACK_WEBHOOK_URL not configured, alerts will be skipped")
+            logging.warning("SLACK_WEBHOOK_URL not configured, alerts will be skipped")
         
         # Get enabled events
         events_config = rt_config.get("events", [])
@@ -99,7 +100,7 @@ def rt_mp_collector(request):
                 all_events.extend(events)
                 
             except Exception as e:
-                print(f"Error collecting events for {event_name}: {e}")
+                logging.error(f"Error collecting events for {event_name}: {e}")
                 # Continue with other events
                 continue
         
@@ -109,7 +110,7 @@ def rt_mp_collector(request):
                 insert_events_to_rt_table(all_events)
                 print(f"Successfully stored {len(all_events)} events in BigQuery")
             except Exception as e:
-                print(f"Error storing events in BigQuery: {e}")
+                logging.error(f"Error storing events in BigQuery: {e}")
                 # Continue with alerting even if storage fails
         else:
             print("No events to store")
@@ -160,7 +161,7 @@ def rt_mp_collector(request):
                         
                 except Exception as bq_error:
                     # BigQuery not available (local testing) - use collected events
-                    print(f"⚠️  BigQuery not available, using collected events (local testing only)")
+                    logging.warning("BigQuery not available, using collected events (local testing only)")
                     
                     if aggregation_type == "percentage":
                         # Calculate from collected events
@@ -228,14 +229,14 @@ def rt_mp_collector(request):
                             alerts_sent += 1
                             
                         except Exception as e:
-                            print(f"Error sending alert for {event_name}: {e}")
+                            logging.error(f"Error sending alert for {event_name}: {e}")
                             # Continue with other events
                             continue
                 else:
                     print(f"No alert needed for {event_name} ({alert_value} <= {threshold})")
                     
             except Exception as e:
-                print(f"Error checking threshold for {event_name}: {e}")
+                logging.error(f"Error checking threshold for {event_name}: {e}")
                 import traceback
                 traceback.print_exc()
                 # Continue with other events
@@ -253,7 +254,7 @@ def rt_mp_collector(request):
         }
         
     except Exception as e:
-        print(f"Error in rt_mp_collector: {e}")
+        logging.error(f"Error in rt_mp_collector: {e}")
         raise
 
 
@@ -287,7 +288,7 @@ try:
                 return jsonify({"status": "success", "result": str(result)}), 200
                 
         except Exception as e:
-            print(f"Error handling request: {e}")
+            logging.error(f"Error handling request: {e}")
             import traceback
             traceback.print_exc()
             return jsonify({"status": "error", "message": str(e)}), 500
@@ -328,7 +329,7 @@ def count_distinct_users_export_api(
     if start_time > now:
         raise ValueError(f"Start time {start_time} is in the future")
     if end_time > now:
-        print(f"Warning: End time {end_time} is in the future, adjusting to now")
+        logging.warning(f"End time {end_time} is in the future, adjusting to now")
         end_time = now
     if end_time < start_time:
         raise ValueError(f"End time {end_time} is before start time {start_time}")
@@ -422,7 +423,7 @@ def count_distinct_users_export_api(
                 except (requests.exceptions.ConnectionError, requests.exceptions.ChunkedEncodingError, 
                         requests.exceptions.Timeout, OSError) as stream_error:
                     # Connection error during streaming - retry if we haven't exceeded max retries
-                    print(f"⚠️  Connection error during streaming (processed {lines_processed} lines): {stream_error}")
+                    logging.warning(f"Connection error during streaming (processed {lines_processed} lines): {stream_error}")
                     if retry_count < max_retries:
                         retry_count += 1
                         import time
@@ -431,7 +432,7 @@ def count_distinct_users_export_api(
                         time.sleep(wait_time)
                         continue
                     else:
-                        print(f"⚠️  Max retries exceeded. Returning 0 distinct users.")
+                        logging.warning("Max retries exceeded. Returning 0 distinct users.")
                         return 0
                         
             elif response.status_code == 429:
@@ -444,15 +445,15 @@ def count_distinct_users_export_api(
                     retry_count += 1
                     continue
                 else:
-                    print(f"⚠️  Mixpanel Export API rate limited after {max_retries} retries")
+                    logging.warning(f"Mixpanel Export API rate limited after {max_retries} retries")
                     return 0
             else:
-                print(f"⚠️  Mixpanel Export API returned {response.status_code}: {response.text[:200]}")
+                logging.warning(f"Mixpanel Export API returned {response.status_code}: {response.text[:200]}")
                 return 0
                 
         except (requests.exceptions.RequestException, OSError) as e:
             # Network or connection error - retry if we haven't exceeded max retries
-            print(f"⚠️  Error connecting to Mixpanel Export API: {e}")
+            logging.warning(f"Error connecting to Mixpanel Export API: {e}")
             if retry_count < max_retries:
                 retry_count += 1
                 import time
@@ -461,13 +462,13 @@ def count_distinct_users_export_api(
                 time.sleep(wait_time)
                 continue
             else:
-                print(f"⚠️  Max retries exceeded. Error: {e}")
+                logging.warning(f"Max retries exceeded. Error: {e}")
                 import traceback
                 traceback.print_exc()
                 return 0
         except Exception as e:
             # Other unexpected errors - don't retry
-            print(f"⚠️  Unexpected error counting events from Mixpanel Export API: {e}")
+            logging.warning(f"Unexpected error counting events from Mixpanel Export API: {e}")
             import traceback
             traceback.print_exc()
             return 0
@@ -503,7 +504,7 @@ def fetch_mixpanel_events(
     if start_time > now:
         raise ValueError(f"Start time {start_time} is in the future")
     if end_time > now:
-        print(f"Warning: End time {end_time} is in the future, adjusting to now")
+        logging.warning(f"End time {end_time} is in the future, adjusting to now")
         end_time = now
     if end_time < start_time:
         raise ValueError(f"End time {end_time} is before start time {start_time}")
@@ -617,10 +618,10 @@ def fetch_mixpanel_events(
                 except (requests.exceptions.ConnectionError, requests.exceptions.ChunkedEncodingError, 
                         requests.exceptions.Timeout, OSError) as stream_error:
                     # Connection error during streaming - retry
-                    print(f"⚠️  Connection error during streaming (processed {event_count} events): {stream_error}")
+                    logging.warning(f"Connection error during streaming (processed {event_count} events): {stream_error}")
                     retry_count += 1
                     if retry_count >= max_retries:
-                        print(f"⚠️  Max retries exceeded. Returning {len(all_events)} events collected so far.")
+                        logging.warning(f"Max retries exceeded. Returning {len(all_events)} events collected so far.")
                         break
                     import time
                     wait_time = retry_count * 2
@@ -634,10 +635,10 @@ def fetch_mixpanel_events(
                 try:
                     error_body = response.text
                     error_msg += f": {error_body}"
-                    print(f"❌ {error_msg}")
-                    print(f"   URL: {full_url}")
-                    print(f"   Request params: {params}")
-                    print(f"   Response headers: {dict(response.headers)}")
+                    logging.error(f"{error_msg}")
+                    logging.error(f"   URL: {full_url}")
+                    logging.error(f"   Request params: {params}")
+                    logging.error(f"   Response headers: {dict(response.headers)}")
                 except:
                     pass
                 
@@ -688,7 +689,7 @@ def fetch_mixpanel_events(
                     error_msg += f": {error_body}"
                 except:
                     pass
-                print(f"❌ {error_msg}")
+                logging.error(f"{error_msg}")
                 response.raise_for_status()
                 
         except requests.exceptions.HTTPError as e:
@@ -697,10 +698,10 @@ def fetch_mixpanel_events(
         except requests.exceptions.RequestException as e:
             retry_count += 1
             if retry_count >= max_retries:
-                print(f"❌ Failed after {max_retries} retries: {e}")
+                logging.error(f"Failed after {max_retries} retries: {e}")
                 raise
             import time
-            print(f"⚠️  Request failed, retrying ({retry_count}/{max_retries})...")
+            logging.warning(f"Request failed, retrying ({retry_count}/{max_retries})...")
             time.sleep(5)
     
     return all_events
@@ -761,7 +762,7 @@ def query_mixpanel_distinct_users(
     if start_time > now:
         raise ValueError(f"Start time {start_time} is in the future")
     if end_time > now:
-        print(f"Warning: End time {end_time} is in the future, adjusting to now")
+        logging.warning(f"End time {end_time} is in the future, adjusting to now")
         end_time = now
     if end_time < start_time:
         raise ValueError(f"End time {end_time} is before start time {start_time}")
@@ -947,28 +948,28 @@ def query_mixpanel_distinct_users(
                                         total_uniques = max(interval_values)
                                         print(f"Query API: {len(interval_values)} interval(s) overlap window, uniques: {interval_values}, using max: {total_uniques}")
                                 else:
-                                    print(f"⚠️  No intervals found overlapping time window {start_time} to {end_time}")
+                                    logging.warning(f"No intervals found overlapping time window {start_time} to {end_time}")
                                     total_uniques = 0
                             else:
-                                print(f"⚠️  Unexpected time series value format: {type(sample_value)}")
-                                print(f"Sample value: {sample_value}")
+                                logging.warning(f"Unexpected time series value format: {type(sample_value)}")
+                                logging.warning(f"Sample value: {sample_value}")
                                 return 0
                         else:
-                            print(f"⚠️  Time series is not a dict: {type(time_series)}")
+                            logging.warning(f"Time series is not a dict: {type(time_series)}")
                             return 0
                         
                         print(f"Mixpanel Query API returned {total_uniques} distinct users for {query_type}")
                         return total_uniques
                     else:
-                        print(f"⚠️  No event key found in response")
+                        logging.warning("No event key found in response")
                         return 0
                 else:
-                    print(f"⚠️  No 'values' key in data object. Keys: {list(data_obj.keys())}")
+                    logging.warning(f"No 'values' key in data object. Keys: {list(data_obj.keys())}")
                     # Try to print the actual response for debugging
                     print(f"Response data: {json.dumps(data, indent=2)[:500]}")
                     return 0
             else:
-                print(f"⚠️  No 'data' key in response. Keys: {list(data.keys())}")
+                logging.warning(f"No 'data' key in response. Keys: {list(data.keys())}")
                 print(f"Response: {json.dumps(data, indent=2)[:500]}")
                 return 0
         else:
@@ -976,7 +977,7 @@ def query_mixpanel_distinct_users(
             try:
                 error_body = response.text[:500]
                 error_msg += f": {error_body}"
-                print(f"⚠️  {error_msg}")
+                logging.warning(f"{error_msg}")
             except:
                 pass
             
@@ -985,7 +986,7 @@ def query_mixpanel_distinct_users(
             if not event_name and response.status_code == 400:
                 return 0
             
-            print(f"⚠️  {error_msg}, using BigQuery fallback")
+            logging.warning(f"{error_msg}, using BigQuery fallback")
             # Fallback to BigQuery
             if event_name:
                 return query_distinct_users_by_hour(event_name, start_time, end_time)
@@ -993,7 +994,7 @@ def query_mixpanel_distinct_users(
                 return query_total_active_users_by_hour(start_time, end_time)
             
     except Exception as e:
-        print(f"⚠️  Error querying Mixpanel Query API: {e}, using BigQuery fallback")
+        logging.warning(f"Error querying Mixpanel Query API: {e}, using BigQuery fallback")
         import traceback
         traceback.print_exc()
         # Fallback to BigQuery
@@ -1031,7 +1032,7 @@ def fetch_total_active_users_from_mixpanel(
     if start_time > now:
         raise ValueError(f"Start time {start_time} is in the future")
     if end_time > now:
-        print(f"Warning: End time {end_time} is in the future, adjusting to now")
+        logging.warning(f"End time {end_time} is in the future, adjusting to now")
         end_time = now
     if end_time < start_time:
         raise ValueError(f"End time {end_time} is before start time {start_time}")
@@ -1101,7 +1102,7 @@ def fetch_total_active_users_from_mixpanel(
                         continue
                     
                     if event_count >= max_events:
-                        print(f"⚠️  Reached processing limit ({max_events} events), found {events_in_window} in time window")
+                        logging.warning(f"Reached processing limit ({max_events} events), found {events_in_window} in time window")
                         print(f"   Events before window: {events_before_window}, after window: {events_after_window}")
                         if earliest_event_time:
                             print(f"   Earliest event: {datetime.fromtimestamp(earliest_event_time)} UTC (timestamp: {earliest_event_time})")
@@ -1140,11 +1141,11 @@ def fetch_total_active_users_from_mixpanel(
                                 print(f"  Event {event_count}: timestamp={event_time} ({dt} UTC), in_window={in_window}, events_in_window={events_in_window}, distinct_users={len(distinct_users)}")
                     except (json.JSONDecodeError, KeyError, TypeError) as e:
                         if event_count <= 5:
-                            print(f"  Error parsing event {event_count}: {e}")
+                            logging.error(f"Error parsing event {event_count}: {e}")
                         continue
                 
                 if events_in_window == 0:
-                    print(f"⚠️  Processed {event_count} events but found 0 in time window, using BigQuery fallback")
+                    logging.warning(f"Processed {event_count} events but found 0 in time window, using BigQuery fallback")
                     return query_total_active_users_by_hour(start_time, end_time)
                 
                 print(f"Processed {event_count} events from Mixpanel ({events_in_window} in time window), found {len(distinct_users)} distinct active users")
@@ -1153,19 +1154,19 @@ def fetch_total_active_users_from_mixpanel(
             except (requests.exceptions.ConnectionError, requests.exceptions.ChunkedEncodingError, 
                     requests.exceptions.Timeout, OSError) as stream_error:
                 # Connection error during streaming
-                print(f"⚠️  Connection error during streaming (processed {event_count} events): {stream_error}")
+                logging.warning(f"Connection error during streaming (processed {event_count} events): {stream_error}")
                 if events_in_window == 0:
-                    print(f"⚠️  No events processed in time window, using BigQuery fallback")
+                    logging.warning("No events processed in time window, using BigQuery fallback")
                     return query_total_active_users_by_hour(start_time, end_time)
                 else:
-                    print(f"⚠️  Returning partial result: {len(distinct_users)} distinct users from {events_in_window} events")
+                    logging.warning(f"Returning partial result: {len(distinct_users)} distinct users from {events_in_window} events")
                     return len(distinct_users)
         else:
-            print(f"⚠️  Mixpanel Export API returned {response.status_code}, using BigQuery fallback")
+            logging.warning(f"Mixpanel Export API returned {response.status_code}, using BigQuery fallback")
             return query_total_active_users_by_hour(start_time, end_time)
             
     except Exception as e:
-        print(f"⚠️  Error fetching total active users from Mixpanel: {e}, using BigQuery fallback")
+        logging.warning(f"Error fetching total active users from Mixpanel: {e}, using BigQuery fallback")
         import traceback
         traceback.print_exc()
         return query_total_active_users_by_hour(start_time, end_time)

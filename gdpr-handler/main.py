@@ -13,12 +13,15 @@ from shared.slack_client import (
 from shared.bigquery_client import (
     insert_gdpr_requests,
     get_gdpr_request_by_ticket_id,
+    get_gdpr_requests_by_ticket_ids,
     update_gdpr_request_status,
-    get_player_dates
+    get_player_dates,
+    get_bigquery_client
 )
 from api_clients import (
     create_mixpanel_gdpr_request,
     create_singular_gdpr_request,
+    create_applovin_gdpr_request,
     check_mixpanel_gdpr_status,
     check_singular_gdpr_status
 )
@@ -48,6 +51,56 @@ def has_emoji(message: Dict, emoji_name: str) -> bool:
         if reaction.get("name") == emoji_name:
             return True
     return False
+
+
+def get_advertising_ids(distinct_ids: List[str]) -> Dict[str, Dict[str, Optional[str]]]:
+    """
+    Fetch advertising IDs (IDFA/GAID) from dim_player table for given distinct_ids.
+    
+    Args:
+        distinct_ids: List of distinct_id values to query
+    
+    Returns:
+        Dictionary mapping distinct_id to dict with keys:
+        - last_idfa: Last IDFA (iOS advertising ID)
+        - first_idfa: First IDFA (iOS advertising ID)
+        - last_gaid: Last GAID (Android advertising ID)
+        - first_gaid: First GAID (Android advertising ID)
+    """
+    if not distinct_ids:
+        return {}
+    
+    client = get_bigquery_client()
+    
+    # Build query to fetch advertising IDs from dim_player
+    distinct_ids_str = "', '".join(distinct_ids)
+    query = f"""
+    SELECT 
+        distinct_id,
+        last_idfa,
+        first_idfa,
+        last_gaid,
+        first_gaid
+    FROM `yotam-395120.peerplay.dim_player`
+    WHERE distinct_id IN ('{distinct_ids_str}')
+    """
+    
+    try:
+        results = client.query(query).result()
+        advertising_data = {}
+        
+        for row in results:
+            advertising_data[row.distinct_id] = {
+                "last_idfa": row.last_idfa,
+                "first_idfa": row.first_idfa,
+                "last_gaid": row.last_gaid,
+                "first_gaid": row.first_gaid,
+            }
+        
+        return advertising_data
+    except Exception as e:
+        print(f"❌ Error fetching advertising IDs from dim_player: {e}")
+        return {}
 
 
 def is_valid_gdpr_message(message: Dict) -> bool:
@@ -249,7 +302,7 @@ def process_gdpr_requests(
     # Filter messages: must contain "delete", "user", and "ticket" (case-insensitive)
     print("Filtering valid GDPR deletion request messages...")
     filtered_messages = []
-    status_check_messages = []  # Messages with computer emoji for status checking
+    status_check_messages = []  # Messages with computer or white_check_mark emoji for status checking
     
     for message in messages:
         # Check if message is a valid GDPR deletion request
@@ -264,36 +317,69 @@ def process_gdpr_requests(
             "💻" in message.get("text", "")
         )
         
-        if not has_computer:
+        has_white_check_mark = (
+            has_emoji(message, "white_check_mark") or
+            ":white_check_mark:" in message.get("text", "") or
+            "✅" in message.get("text", "")
+        )
+        
+        # Treat white_check_mark the same as computer (laptop) - skip new processing
+        if not has_computer and not has_white_check_mark:
             filtered_messages.append(message)
-        elif has_computer:
+        elif has_computer or has_white_check_mark:
             status_check_messages.append(message)
     
     print(f"Found {len(filtered_messages)} new messages to process")
-    print(f"Found {len(status_check_messages)} messages with computer emoji for status check")
+    print(f"Found {len(status_check_messages)} messages with computer/white_check_mark emoji for status check")
     
     # Ensure table exists
     from shared.bigquery_client import ensure_gdpr_table_exists
     ensure_gdpr_table_exists()
     
     # Process new messages (Phase 1: New Request Processing)
-    gdpr_requests = []
-    processed_count = 0
-    error_count = 0
+    # First, parse all messages and collect distinct_ids and ticket_ids for batch queries
+    print("Parsing messages and collecting user IDs for batch queries...")
+    parsed_messages = []
+    distinct_ids_to_fetch = []
+    ticket_ids_to_fetch = []
     
     for message in filtered_messages:
         try:
             parsed = parse_message(message)
             if not parsed:
                 print(f"Warning: Could not parse message {message.get('ts')}: {message.get('text', '')[:100]}")
-                error_count += 1
                 continue
             
+            parsed["_message"] = message  # Store original message
+            parsed_messages.append(parsed)
+            distinct_ids_to_fetch.append(parsed["distinct_id"])
+            if parsed.get("ticket_id"):
+                ticket_ids_to_fetch.append(parsed["ticket_id"])
+        except Exception as e:
+            print(f"Error parsing message {message.get('ts')}: {e}")
+            continue
+    
+    # Batch fetch all data upfront
+    print(f"\nBatch fetching data for {len(distinct_ids_to_fetch)} users...")
+    player_data = get_player_dates(distinct_ids_to_fetch) if distinct_ids_to_fetch else {}
+    advertising_data = get_advertising_ids(distinct_ids_to_fetch) if distinct_ids_to_fetch else {}
+    existing_records = get_gdpr_requests_by_ticket_ids(ticket_ids_to_fetch) if ticket_ids_to_fetch else {}
+    print(f"✅ Fetched player data for {len(player_data)} users")
+    print(f"✅ Fetched advertising IDs for {len(advertising_data)} users")
+    print(f"✅ Fetched {len(existing_records)} existing records")
+    
+    # Now process each message using cached data
+    gdpr_requests = []
+    processed_count = 0
+    error_count = 0
+    
+    for parsed in parsed_messages:
+        try:
+            message = parsed["_message"]
             distinct_id = parsed["distinct_id"]
             print(f"\nProcessing deletion request for user: {distinct_id}")
             
-            # Fetch player data to get last_activity_date
-            player_data = get_player_dates([distinct_id])
+            # Use cached player data
             player_info = player_data.get(distinct_id, {})
             last_activity_date = player_info.get("last_activity_date")
             install_date = player_info.get("install_date")
@@ -306,6 +392,7 @@ def process_gdpr_requests(
             
             mixpanel_request_id = None
             singular_request_id = None
+            max_mediation_status = "not started"
             
             # Check if we should create deletion requests (14-day rule)
             if days_since_activity is None or days_since_activity >= 14:
@@ -327,6 +414,79 @@ def process_gdpr_requests(
                     singular_request_id = create_singular_gdpr_request(distinct_id)
                 except Exception as e:
                     print(f"⚠️  Failed to create Singular request: {e}")
+                
+                # Fetch advertising IDs and create AppLovin GDPR request
+                try:
+                    # Check if AppLovin deletion is already completed for this user (use cached data)
+                    ticket_id = parsed.get("ticket_id")
+                    existing_record = existing_records.get(ticket_id) if ticket_id else None
+                    existing_max_status = existing_record.get("max_mediation_deletion_status") if existing_record else None
+                    
+                    if existing_max_status == "completed":
+                        print(f"⚠️  AppLovin deletion already completed for user {distinct_id}, skipping")
+                        max_mediation_status = "completed"
+                    elif existing_max_status is None:
+                        # Status is NULL - this is an old record, create AppLovin request
+                        print(f"📝 AppLovin status is NULL for user {distinct_id}, creating deletion request...")
+                        # Use cached advertising data
+                        ad_info = advertising_data.get(distinct_id, {})
+                        
+                        # Collect all non-null advertising IDs
+                        advertising_ids = []
+                        if ad_info.get("last_idfa"):
+                            advertising_ids.append(ad_info["last_idfa"])
+                        if ad_info.get("first_idfa") and ad_info["first_idfa"] != ad_info.get("last_idfa"):
+                            advertising_ids.append(ad_info["first_idfa"])
+                        if ad_info.get("last_gaid"):
+                            advertising_ids.append(ad_info["last_gaid"])
+                        if ad_info.get("first_gaid") and ad_info["first_gaid"] != ad_info.get("last_gaid"):
+                            advertising_ids.append(ad_info["first_gaid"])
+                        
+                        if advertising_ids:
+                            print(f"   Found {len(advertising_ids)} advertising IDs: {advertising_ids}")
+                            print(f"Creating AppLovin Max GDPR deletion request...")
+                            num_deleted = create_applovin_gdpr_request(advertising_ids)
+                            if num_deleted is not None and num_deleted > 0:
+                                max_mediation_status = "completed"
+                                print(f"✅ AppLovin deletion completed: {num_deleted} IDs deleted")
+                            else:
+                                max_mediation_status = "pending"
+                                print(f"⚠️  AppLovin deletion request created but status unclear")
+                        else:
+                            print(f"✅ No advertising IDs found for user {distinct_id}, AppLovin deletion not needed (nothing to delete)")
+                            max_mediation_status = "completed"
+                    else:
+                        # Status is "pending" or "not started" - create AppLovin request
+                        # Use cached advertising data
+                        ad_info = advertising_data.get(distinct_id, {})
+                        
+                        # Collect all non-null advertising IDs
+                        advertising_ids = []
+                        if ad_info.get("last_idfa"):
+                            advertising_ids.append(ad_info["last_idfa"])
+                        if ad_info.get("first_idfa") and ad_info["first_idfa"] != ad_info.get("last_idfa"):
+                            advertising_ids.append(ad_info["first_idfa"])
+                        if ad_info.get("last_gaid"):
+                            advertising_ids.append(ad_info["last_gaid"])
+                        if ad_info.get("first_gaid") and ad_info["first_gaid"] != ad_info.get("last_gaid"):
+                            advertising_ids.append(ad_info["first_gaid"])
+                        
+                        if advertising_ids:
+                            print(f"   Found {len(advertising_ids)} advertising IDs: {advertising_ids}")
+                            print(f"Creating AppLovin Max GDPR deletion request...")
+                            num_deleted = create_applovin_gdpr_request(advertising_ids)
+                            if num_deleted is not None and num_deleted > 0:
+                                max_mediation_status = "completed"
+                                print(f"✅ AppLovin deletion completed: {num_deleted} IDs deleted")
+                            else:
+                                max_mediation_status = "pending"
+                                print(f"⚠️  AppLovin deletion request created but status unclear")
+                        else:
+                            print(f"✅ No advertising IDs found for user {distinct_id}, AppLovin deletion not needed (nothing to delete)")
+                            max_mediation_status = "completed"
+                except Exception as e:
+                    print(f"⚠️  Failed to create AppLovin request: {e}")
+                    max_mediation_status = "pending"
                 
                 # Remove clock1 emoji if present, add computer emoji
                 message_ts = message.get("ts")
@@ -370,6 +530,7 @@ def process_gdpr_requests(
                 "mixpanel_deletion_status": "pending" if mixpanel_request_id else "not started",
                 "singular_request_id": singular_request_id,
                 "singular_deletion_status": "pending" if singular_request_id else "not started",
+                "max_mediation_deletion_status": max_mediation_status,
                 "bigquery_deletion_status": "not started",
                 "game_state_status": "not started",
                 "is_request_completed": False,
@@ -396,7 +557,7 @@ def process_gdpr_requests(
             print(f"Error inserting into BigQuery: {e}")
             raise
     
-    # Process messages with computer emoji (Phase 2: Status Check Processing)
+    # Process messages with computer or white_check_mark emoji (Phase 2: Status Check Processing)
     status_check_count = 0
     status_error_count = 0
     
@@ -416,38 +577,103 @@ def process_gdpr_requests(
                 print(f"⚠️  No record found in BigQuery for ticket {ticket_id}")
                 continue
             
+            # Skip if already completed (treat white_check_mark same as computer - already processed)
+            is_completed = record.get("is_request_completed", False)
+            if is_completed:
+                print(f"✅ Request already completed (is_request_completed=true), skipping status check")
+                continue
+            
             mixpanel_request_id = record.get("mixpanel_request_id")
             singular_request_id = record.get("singular_request_id")
+            # Don't use default - we need to detect NULL explicitly
+            current_max_mediation_status = record.get("max_mediation_deletion_status")  # Can be None
             
             # Check Mixpanel status
             mixpanel_status = None
-            if mixpanel_request_id:
+            current_mixpanel_status = record.get("mixpanel_deletion_status")
+            if mixpanel_request_id and current_mixpanel_status != "completed":
                 print(f"Checking Mixpanel status for request: {mixpanel_request_id}")
                 mixpanel_status = check_mixpanel_gdpr_status(mixpanel_request_id)
                 if mixpanel_status:
                     print(f"  Mixpanel status: {mixpanel_status}")
+            elif current_mixpanel_status == "completed":
+                print(f"  Mixpanel already completed, skipping API check")
+                mixpanel_status = "completed"  # Use existing status
             else:
                 print("  No Mixpanel request ID found")
             
             # Check Singular status
             singular_status = None
-            if singular_request_id:
+            current_singular_status = record.get("singular_deletion_status")
+            if singular_request_id and current_singular_status != "completed":
                 print(f"Checking Singular status for request: {singular_request_id}")
                 singular_status = check_singular_gdpr_status(singular_request_id)
                 if singular_status:
                     print(f"  Singular status: {singular_status}")
+            elif current_singular_status == "completed":
+                print(f"  Singular already completed, skipping API check")
+                singular_status = "completed"  # Use existing status
             else:
                 print("  No Singular request ID found")
+            
+            # Check and handle AppLovin status (create request if NULL)
+            distinct_id = record.get("distinct_id")
+            max_mediation_status = None
+            
+            # If status is None (NULL in database), create AppLovin deletion request
+            if current_max_mediation_status is None:
+                print(f"📝 AppLovin status is NULL for ticket {ticket_id}, creating deletion request...")
+                try:
+                    # Fetch advertising IDs for this user
+                    advertising_data = get_advertising_ids([distinct_id])
+                    ad_info = advertising_data.get(distinct_id, {})
+                    
+                    # Collect all non-null advertising IDs
+                    advertising_ids = []
+                    if ad_info.get("last_idfa"):
+                        advertising_ids.append(ad_info["last_idfa"])
+                    if ad_info.get("first_idfa") and ad_info["first_idfa"] != ad_info.get("last_idfa"):
+                        advertising_ids.append(ad_info["first_idfa"])
+                    if ad_info.get("last_gaid"):
+                        advertising_ids.append(ad_info["last_gaid"])
+                    if ad_info.get("first_gaid") and ad_info["first_gaid"] != ad_info.get("last_gaid"):
+                        advertising_ids.append(ad_info["first_gaid"])
+                    
+                    if advertising_ids:
+                        print(f"   Found {len(advertising_ids)} advertising IDs: {advertising_ids}")
+                        print(f"Creating AppLovin Max GDPR deletion request...")
+                        num_deleted = create_applovin_gdpr_request(advertising_ids)
+                        if num_deleted is not None and num_deleted > 0:
+                            max_mediation_status = "completed"
+                            print(f"✅ AppLovin deletion completed: {num_deleted} IDs deleted")
+                        else:
+                            max_mediation_status = "pending"
+                            print(f"⚠️  AppLovin deletion request created but status unclear")
+                    else:
+                        print(f"✅ No advertising IDs found for user {distinct_id}, AppLovin deletion not needed (nothing to delete)")
+                        max_mediation_status = "completed"
+                except Exception as e:
+                    print(f"⚠️  Failed to create AppLovin request: {e}")
+                    max_mediation_status = "pending"
+            else:
+                # Status exists, use it
+                max_mediation_status = current_max_mediation_status
+            
+            # Note: AppLovin deletion is synchronous (returns immediately), so we don't need to check status
+            # The status is set when the request is created (completed if successful, pending otherwise)
             
             # Update BigQuery with latest statuses
             final_mixpanel_status = mixpanel_status if mixpanel_status else record.get("mixpanel_deletion_status")
             final_singular_status = singular_status if singular_status else record.get("singular_deletion_status")
+            final_max_mediation_status = max_mediation_status  # AppLovin status (updated if NULL)
             
-            if mixpanel_status or singular_status:
+            # Update BigQuery if we have any status changes
+            if mixpanel_status or singular_status or current_max_mediation_status is None:
                 update_gdpr_request_status(
                     ticket_id,
                     mixpanel_status=mixpanel_status,
-                    singular_status=singular_status
+                    singular_status=singular_status,
+                    max_mediation_status=final_max_mediation_status if final_max_mediation_status != "not started" else None
                 )
             
             # Update emojis based on status
@@ -455,21 +681,22 @@ def process_gdpr_requests(
             if message_ts:
                 mixpanel_done = (final_mixpanel_status == "completed")
                 singular_done = (final_singular_status == "completed")
+                max_mediation_done = (final_max_mediation_status == "completed")
                 
-                # If both Mixpanel and Singular are completed, add red car
-                if mixpanel_done and singular_done:
+                # If all three automatic processes (Mixpanel, Singular, AppLovin) are completed, add red car
+                if mixpanel_done and singular_done and max_mediation_done:
                     success = add_reaction_to_message(channel_id, message_ts, "car")
                     if success:
                         print(f"✅ Added car emoji to message {message_ts}")
                 
-                # Check if all deletions are completed
+                # Check if all deletions are completed (5 steps: Mixpanel, Singular, AppLovin, BigQuery, GameState)
                 bigquery_status = record.get("bigquery_deletion_status")
                 game_state_status = record.get("game_state_status")
                 
                 bigquery_done = (bigquery_status == "completed")
                 game_state_done = (game_state_status == "completed")
                 
-                if mixpanel_done and singular_done and bigquery_done and game_state_done:
+                if mixpanel_done and singular_done and max_mediation_done and bigquery_done and game_state_done:
                     # All deletions completed - add white check mark, remove red car and computer
                     try:
                         remove_reaction(channel_id, message_ts, "car")
@@ -491,6 +718,8 @@ def process_gdpr_requests(
                         pending_items.append(f"Mixpanel={final_mixpanel_status}")
                     if not singular_done:
                         pending_items.append(f"Singular={final_singular_status}")
+                    if not max_mediation_done:
+                        pending_items.append(f"AppLovin={final_max_mediation_status}")
                     if not bigquery_done:
                         pending_items.append(f"BigQuery={bigquery_status}")
                     if not game_state_done:

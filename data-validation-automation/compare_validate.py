@@ -15,13 +15,18 @@ from param_analysis.param_analyzer import ParameterAnalyzer
 class ComparativeValidator:
     """Validator that compares new data against rules from old data."""
     
-    def __init__(self, old_csv_path: str, new_csv_path: str, chunk_size: int = 10000, exclude_parameters: list = None, include_parameters: list = None):
+    def __init__(self, old_csv_path: str, new_csv_path: str, chunk_size: int = 10000, exclude_parameters: list = None, include_parameters: list = None, old_version: str = None, new_version: str = None, start_date: str = None, end_date: str = None, sample_size: int = None):
         self.old_csv_path = Path(old_csv_path)
         self.new_csv_path = Path(new_csv_path)
         self.chunk_size = chunk_size
         self.exclude_parameters = set(exclude_parameters) if exclude_parameters else set()
         self.include_parameters = set(include_parameters) if include_parameters else None
         self.analyzer = ParameterAnalyzer(old_csv_path)
+        self.old_version = old_version
+        self.new_version = new_version
+        self.start_date = start_date
+        self.end_date = end_date
+        self.sample_size = sample_size
         
         # Debug logging for exclusions and inclusions
         if self.exclude_parameters:
@@ -365,7 +370,7 @@ class ComparativeValidator:
                 
             # Get validator details
             validator_details = self.get_validator_details(column)
-            
+                
             result_data = {
                 'total_tested': result['total_tested'],
                 'valid_count': result['valid_count'],
@@ -402,13 +407,31 @@ class ComparativeValidator:
         with open(self.validation_summary, 'w') as f:
             json.dump(final_results, f, indent=2)
         
+        # Count parameters with Jira tickets
+        parameters_with_jira_tickets = sum(1 for col in main_results.keys() if col in self.known_issues)
+        
         # Save filtered main summary to JSON with header
+        header = {
+            'total_parameters_with_errors': len(main_results),
+            'report generation time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'total_rows_tested': sum(r['total_tested'] for r in main_results.values()) if main_results else 0,
+            'parameters_with_jira_tickets': parameters_with_jira_tickets
+        }
+        
+        # Add version and date information if available
+        if self.old_version:
+            header['old_version'] = self.old_version
+        if self.new_version:
+            header['new_version'] = self.new_version
+        if self.start_date:
+            header['start_date'] = self.start_date
+        if self.end_date:
+            header['end_date'] = self.end_date
+        if self.sample_size:
+            header['sample_size'] = self.sample_size
+        
         main_summary_with_header = {
-            'header': {
-                'total_parameters_with_errors': len(main_results),
-                'generation_timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                'total_rows_tested': sum(r['total_tested'] for r in main_results.values()) if main_results else 0
-            },
+            'header': header,
             'parameters': main_results
         }
         

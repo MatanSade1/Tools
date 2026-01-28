@@ -86,13 +86,16 @@ class AlertConfig:
     resolution: str
     owner: str
     is_active: str
-    slack_alert_channel: str
     alert_id: str = None
     jira_id: str = None
     data_query_link: str = None
     notion_doc_link: str = None
-    threshold_for_alerting: int = None
-    max_hourly_alerts_per_day: int = None
+    threshold_sandbox: int = None
+    threshold_non_critical: int = None
+    threshold_critical: int = None
+    max_hourly_alerts_sandbox: int = None
+    max_hourly_alerts_non_critical: int = None
+    max_hourly_alerts_critical: int = None
 
 def is_test_mode():
     """Check if running in test mode based on environment variable or command line"""
@@ -128,6 +131,7 @@ def load_alerts_from_bigquery(client, resolution=None, settings_table=None):
     if settings_table is None:
         settings_table = get_settings_table_name()
     
+    # Both production and stage tables now use the new schema
     query = f"""
     SELECT 
         name, 
@@ -136,13 +140,16 @@ def load_alerts_from_bigquery(client, resolution=None, settings_table=None):
         resolution, 
         owner, 
         is_active, 
-        COALESCE(slack_alert_channel, 'data-alerts-sandbox') as slack_alert_channel,
         alert_id,
         jira_id,
         data_query_link,
         notion_doc_link,
-        threshold_for_alerting,
-        max_hourly_alerts_per_day
+        threshold_sandbox,
+        threshold_non_critical,
+        threshold_critical,
+        max_hourly_alerts_sandbox,
+        max_hourly_alerts_non_critical,
+        max_hourly_alerts_critical
     FROM `{settings_table}`
     WHERE is_active = 'T'
     """
@@ -165,30 +172,82 @@ def load_alerts_from_bigquery(client, resolution=None, settings_table=None):
         if row.resolution == 'D' and not is_execution_time_for_daily_alerts():
             logger.info(f"Skipping daily alert '{row.name}' as current time is not between 4:50AM and 5:49AM")
             continue
-            
-        # Check threshold_for_alerting
-        threshold = None
-        if hasattr(row, 'threshold_for_alerting') and row.threshold_for_alerting is not None:
+        
+        # Get threshold and max_hourly_alerts values
+        threshold_sandbox = getattr(row, 'threshold_sandbox', None)
+        threshold_non_critical = getattr(row, 'threshold_non_critical', None)
+        threshold_critical = getattr(row, 'threshold_critical', None)
+        max_hourly_alerts_sandbox = getattr(row, 'max_hourly_alerts_sandbox', None)
+        max_hourly_alerts_non_critical = getattr(row, 'max_hourly_alerts_non_critical', None)
+        max_hourly_alerts_critical = getattr(row, 'max_hourly_alerts_critical', None)
+        
+        # Validate thresholds - must be positive integers if not NULL
+        if threshold_sandbox is not None:
             try:
-                threshold = int(row.threshold_for_alerting)
-                if threshold <= 0:
-                    logger.error(f"Invalid threshold_for_alerting value for alert '{row.name}': {threshold}. Must be a positive integer. This alert will be skipped.")
+                threshold_sandbox = int(threshold_sandbox)
+                if threshold_sandbox <= 0:
+                    logger.error(f"Invalid threshold_sandbox value for alert '{row.name}': {threshold_sandbox}. Must be a positive integer. This alert will be skipped.")
                     continue
             except (ValueError, TypeError):
-                logger.error(f"Invalid threshold_for_alerting value for alert '{row.name}': {row.threshold_for_alerting}. Must be a valid integer. This alert will be processed with default threshold.")
-                threshold = None
+                logger.error(f"Invalid threshold_sandbox value for alert '{row.name}': {threshold_sandbox}. Must be a valid integer. This alert will be skipped.")
+                continue
         
-        # Check max_hourly_alerts_per_day for hourly alerts
-        max_hourly_alerts = None
-        if row.resolution == 'H' and hasattr(row, 'max_hourly_alerts_per_day') and row.max_hourly_alerts_per_day is not None:
+        if threshold_non_critical is not None:
             try:
-                max_hourly_alerts = int(row.max_hourly_alerts_per_day)
-                if max_hourly_alerts <= 0:
-                    logger.error(f"Invalid max_hourly_alerts_per_day value for alert '{row.name}': {max_hourly_alerts}. Must be a positive integer. This alert will use unlimited alerts.")
-                    max_hourly_alerts = None
+                threshold_non_critical = int(threshold_non_critical)
+                if threshold_non_critical <= 0:
+                    logger.error(f"Invalid threshold_non_critical value for alert '{row.name}': {threshold_non_critical}. Must be a positive integer. This alert will be skipped.")
+                    continue
             except (ValueError, TypeError):
-                logger.error(f"Invalid max_hourly_alerts_per_day value for alert '{row.name}': {row.max_hourly_alerts_per_day}. Must be a valid integer. This alert will use unlimited alerts.")
-                max_hourly_alerts = None
+                logger.error(f"Invalid threshold_non_critical value for alert '{row.name}': {threshold_non_critical}. Must be a valid integer. This alert will be skipped.")
+                continue
+        
+        if threshold_critical is not None:
+            try:
+                threshold_critical = int(threshold_critical)
+                if threshold_critical <= 0:
+                    logger.error(f"Invalid threshold_critical value for alert '{row.name}': {threshold_critical}. Must be a positive integer. This alert will be skipped.")
+                    continue
+            except (ValueError, TypeError):
+                logger.error(f"Invalid threshold_critical value for alert '{row.name}': {threshold_critical}. Must be a valid integer. This alert will be skipped.")
+                continue
+        
+        # Ensure at least one threshold is defined
+        if threshold_sandbox is None and threshold_non_critical is None and threshold_critical is None:
+            logger.error(f"Alert '{row.name}' has no thresholds defined. At least one threshold (sandbox, non-critical, or critical) must be defined. This alert will be skipped.")
+            continue
+        
+        # Validate max_hourly_alerts for hourly alerts only
+        if row.resolution == 'H':
+            if max_hourly_alerts_sandbox is not None:
+                try:
+                    max_hourly_alerts_sandbox = int(max_hourly_alerts_sandbox)
+                    if max_hourly_alerts_sandbox <= 0:
+                        logger.warning(f"Invalid max_hourly_alerts_sandbox value for alert '{row.name}': {max_hourly_alerts_sandbox}. Must be a positive integer. Setting to unlimited.")
+                        max_hourly_alerts_sandbox = None
+                except (ValueError, TypeError):
+                    logger.warning(f"Invalid max_hourly_alerts_sandbox value for alert '{row.name}': {max_hourly_alerts_sandbox}. Must be a valid integer. Setting to unlimited.")
+                    max_hourly_alerts_sandbox = None
+            
+            if max_hourly_alerts_non_critical is not None:
+                try:
+                    max_hourly_alerts_non_critical = int(max_hourly_alerts_non_critical)
+                    if max_hourly_alerts_non_critical <= 0:
+                        logger.warning(f"Invalid max_hourly_alerts_non_critical value for alert '{row.name}': {max_hourly_alerts_non_critical}. Must be a positive integer. Setting to unlimited.")
+                        max_hourly_alerts_non_critical = None
+                except (ValueError, TypeError):
+                    logger.warning(f"Invalid max_hourly_alerts_non_critical value for alert '{row.name}': {max_hourly_alerts_non_critical}. Must be a valid integer. Setting to unlimited.")
+                    max_hourly_alerts_non_critical = None
+            
+            if max_hourly_alerts_critical is not None:
+                try:
+                    max_hourly_alerts_critical = int(max_hourly_alerts_critical)
+                    if max_hourly_alerts_critical <= 0:
+                        logger.warning(f"Invalid max_hourly_alerts_critical value for alert '{row.name}': {max_hourly_alerts_critical}. Must be a positive integer. Setting to unlimited.")
+                        max_hourly_alerts_critical = None
+                except (ValueError, TypeError):
+                    logger.warning(f"Invalid max_hourly_alerts_critical value for alert '{row.name}': {max_hourly_alerts_critical}. Must be a valid integer. Setting to unlimited.")
+                    max_hourly_alerts_critical = None
                 
         alert = AlertConfig(
             name=row.name,
@@ -197,13 +256,16 @@ def load_alerts_from_bigquery(client, resolution=None, settings_table=None):
             resolution=row.resolution,
             owner=row.owner,
             is_active=row.is_active,
-            slack_alert_channel=row.slack_alert_channel,
             alert_id=row.alert_id if hasattr(row, 'alert_id') else None,
             jira_id=row.jira_id if hasattr(row, 'jira_id') else None,
             data_query_link=row.data_query_link if hasattr(row, 'data_query_link') else None,
             notion_doc_link=row.notion_doc_link if hasattr(row, 'notion_doc_link') else None,
-            threshold_for_alerting=threshold,
-            max_hourly_alerts_per_day=max_hourly_alerts
+            threshold_sandbox=threshold_sandbox,
+            threshold_non_critical=threshold_non_critical,
+            threshold_critical=threshold_critical,
+            max_hourly_alerts_sandbox=max_hourly_alerts_sandbox,
+            max_hourly_alerts_non_critical=max_hourly_alerts_non_critical,
+            max_hourly_alerts_critical=max_hourly_alerts_critical
         )
         alerts.append(alert)
     
@@ -333,12 +395,12 @@ class AlertProcessor:
             self.logger.error(f"History table verification failed: {str(e)}")
             self.logger.error("This will prevent cooldown functionality from working properly")
 
-    def check_hourly_alert_cooldown(self, alert: AlertConfig) -> bool:
+    def check_hourly_alert_cooldown(self, alert: AlertConfig, channel: str, max_hourly_alerts: int) -> bool:
         """
-        Check if an hourly alert has exceeded its daily limit.
+        Check if an hourly alert has exceeded its daily limit for a specific channel.
         Returns True if alert can be sent, False if it's in cooldown.
         """
-        if alert.resolution != 'H' or alert.max_hourly_alerts_per_day is None:
+        if alert.resolution != 'H' or max_hourly_alerts is None:
             return True  # No cooldown for daily alerts or unlimited hourly alerts
         
         # Ensure alert_id exists for cooldown check
@@ -348,7 +410,7 @@ class AlertProcessor:
         
         current_date = date.today()
         
-        # Query to count how many alerts were generated today for this alert_id
+        # Query to count how many alerts were generated today for this alert_id and channel
         if self.test_mode:
             history_table = 'yotam-395120.peerplay.bigquery_alerts_execution_history_stage'
         else:
@@ -360,17 +422,19 @@ class AlertProcessor:
           AND execution_date = @current_date
           AND alert_generated = TRUE
           AND success = TRUE
+          AND slack_channel = @slack_channel
         """
         
         job_config = bigquery.QueryJobConfig(
             query_parameters=[
                 bigquery.ScalarQueryParameter("alert_id", "INT64", int(alert.alert_id)),
-                bigquery.ScalarQueryParameter("current_date", "DATE", current_date)
+                bigquery.ScalarQueryParameter("current_date", "DATE", current_date),
+                bigquery.ScalarQueryParameter("slack_channel", "STRING", channel)
             ]
         )
         
         try:
-            self.logger.info(f"Checking cooldown for alert_id {alert.alert_id} on date {current_date}")
+            self.logger.info(f"Checking cooldown for alert_id {alert.alert_id} on date {current_date} for channel {channel}")
             
             # Add timeout to prevent hanging queries (45 seconds total for cooldown check)
             # Use ThreadPoolExecutor to ensure timeout is enforced even if BigQuery client hangs
@@ -396,7 +460,7 @@ class AlertProcessor:
                         self.logger.warning(f"Failed to cancel cooldown query job: {str(cancel_error)}")
                 
                 self.logger.warning(
-                    f"Cooldown check query timed out for alert '{alert.name}' (ID: {alert.alert_id}). "
+                    f"Cooldown check query timed out for alert '{alert.name}' (ID: {alert.alert_id}) for channel {channel}. "
                     f"Allowing alert to proceed (fail open). Error: {str(timeout_error)}"
                 )
                 return True  # Fail open - allow alert if we can't check cooldown
@@ -409,7 +473,7 @@ class AlertProcessor:
                     rows_list = future_list.result(timeout=15)  # 15 seconds to iterate/fetch all pages
             except (FuturesTimeoutError, Exception) as iteration_timeout:
                 self.logger.warning(
-                    f"Cooldown check result iteration timed out for alert '{alert.name}' (ID: {alert.alert_id}). "
+                    f"Cooldown check result iteration timed out for alert '{alert.name}' (ID: {alert.alert_id}) for channel {channel}. "
                     f"Allowing alert to proceed (fail open). Error: {str(iteration_timeout)}"
                 )
                 return True  # Fail open - allow alert if we can't iterate results
@@ -418,28 +482,28 @@ class AlertProcessor:
                 alerts_sent_today = row.alerts_sent_today
                 
                 self.logger.info(
-                    f"Cooldown check for alert '{alert.name}' (ID: {alert.alert_id}): "
-                    f"{alerts_sent_today} alerts sent today, max allowed: {alert.max_hourly_alerts_per_day}"
+                    f"Cooldown check for alert '{alert.name}' (ID: {alert.alert_id}) channel {channel}: "
+                    f"{alerts_sent_today} alerts sent today, max allowed: {max_hourly_alerts}"
                 )
                 
-                if alerts_sent_today >= alert.max_hourly_alerts_per_day:
+                if alerts_sent_today >= max_hourly_alerts:
                     self.logger.info(
-                        f"Alert '{alert.name}' is in cooldown. "
-                        f"Already sent {alerts_sent_today} alerts today (max: {alert.max_hourly_alerts_per_day})"
+                        f"Alert '{alert.name}' is in cooldown for channel {channel}. "
+                        f"Already sent {alerts_sent_today} alerts today (max: {max_hourly_alerts})"
                     )
                     return False
                 else:
                     return True
                     
         except Exception as e:
-            self.logger.error(f"Error checking cooldown for alert '{alert.name}': {str(e)}")
+            self.logger.error(f"Error checking cooldown for alert '{alert.name}' for channel {channel}: {str(e)}")
             # If we can't check cooldown, allow the alert to proceed (fail open)
             return True
         
         return True
 
     def log_alert_execution(self, alert: AlertConfig, alert_generated: bool, row_count: int = None, 
-                          threshold: int = None, success: bool = True, error_message: str = None):
+                          threshold: int = None, channel: str = None, success: bool = True, error_message: str = None):
         """
         Log the alert execution to the history table for cooldown tracking.
         """
@@ -464,7 +528,7 @@ class AlertProcessor:
         row_count_int = row_count if row_count is not None else 0
         threshold_int = threshold if threshold is not None else 1
         alert_name_str = str(alert.name) if alert.name is not None else ""
-        slack_channel_str = str(alert.slack_alert_channel) if alert.slack_alert_channel is not None else ""
+        slack_channel_str = str(channel) if channel is not None else ""
         resolution_str = str(alert.resolution) if alert.resolution is not None else ""
         error_message_str = str(error_message) if error_message is not None else ""
         
@@ -562,7 +626,7 @@ class AlertProcessor:
             return obj.isoformat()
         return str(obj)
 
-    def format_slack_message(self, alert: AlertConfig, row_count: int, first_row: Dict[str, Any]) -> Dict[str, Any]:
+    def format_slack_message(self, alert: AlertConfig, row_count: int, first_row: Dict[str, Any], channel: str, threshold: int) -> Dict[str, Any]:
         # Truncate long values in the first row
         formatted_row = {}
         for key, value in first_row.items():
@@ -572,10 +636,19 @@ class AlertProcessor:
             else:
                 formatted_row[key] = serialized_value
 
-        # Add cooldown information for hourly alerts
+        # Add cooldown information for hourly alerts - channel-specific
         cooldown_text = ""
-        if alert.resolution == 'H' and alert.max_hourly_alerts_per_day:
-            cooldown_text = f"*Max alerts per day:*\n{alert.max_hourly_alerts_per_day}"
+        max_hourly_alerts = None
+        if alert.resolution == 'H':
+            if channel == 'data-alerts-sandbox' and alert.max_hourly_alerts_sandbox is not None:
+                max_hourly_alerts = alert.max_hourly_alerts_sandbox
+            elif channel == 'data-alerts-non-critical' and alert.max_hourly_alerts_non_critical is not None:
+                max_hourly_alerts = alert.max_hourly_alerts_non_critical
+            elif channel == 'data-alerts-critical' and alert.max_hourly_alerts_critical is not None:
+                max_hourly_alerts = alert.max_hourly_alerts_critical
+        
+        if max_hourly_alerts is not None:
+            cooldown_text = f"*Max alerts per day:*\n{max_hourly_alerts}"
         else:
             cooldown_text = "*Max alerts per day:*\nUnlimited"
 
@@ -673,7 +746,7 @@ class AlertProcessor:
                     },
                     {
                         "type": "mrkdwn",
-                        "text": f"*Threshold for alerting:*\n{alert.threshold_for_alerting or 'N/A'}"
+                        "text": f"*Threshold for alerting ({channel}):*\n{threshold or 'N/A'}"
                     }
                 ]
             },
@@ -719,7 +792,7 @@ class AlertProcessor:
         # Format message for mobile notifications
         # text: Used as notification preview (shows only alert title and channel)
         # username: Empty string removes sender name from notification
-        mobile_notification_text = f"{alert.name} - {alert.slack_alert_channel}"
+        mobile_notification_text = f"{alert.name} - {channel or 'N/A'}"
         message = {
             "text": mobile_notification_text,  # Notification preview - shows only alert title and channel
             "username": "",  # Remove sender name from mobile notification
@@ -749,78 +822,63 @@ class AlertProcessor:
 
     def process_alert(self, alert: AlertConfig) -> Dict[str, Any]:
         try:
-            # Check cooldown for hourly alerts ONLY if alert has an alert_id
-            if alert.resolution == 'H' and alert.alert_id:
-                if not self.check_hourly_alert_cooldown(alert):
-                    self.logger.info(f"Alert '{alert.name}' skipped due to cooldown")
-                    # Log the execution as skipped (not generated)
-                    logging_success = self.log_alert_execution(
-                        alert, 
-                        alert_generated=False, 
-                        success=True, 
-                        error_message="Skipped due to cooldown"
-                    )
-                    if not logging_success:
-                        self.logger.warning(f"Failed to log cooldown skip for alert '{alert.name}'")
-                    
-                    return {
-                        'success': True,
-                        'alert_generated': False,
-                        'skipped_reason': 'cooldown',
-                        'max_hourly_alerts_per_day': alert.max_hourly_alerts_per_day,
-                        'timestamp': datetime.now().isoformat(),
-                        'slack_channel': alert.slack_alert_channel,
-                        'logging_success': logging_success
-                    }
-            elif alert.resolution == 'H' and not alert.alert_id:
+            if alert.resolution == 'H' and not alert.alert_id:
                 self.logger.warning(f"Hourly alert '{alert.name}' has no alert_id - cooldown mechanism disabled")
             
             # Add timeout to prevent hanging queries for main alert execution
             # Use ThreadPoolExecutor to ensure timeout is enforced even if BigQuery client hangs
             # Wrap both query submission and result waiting in timeout
-            # Reduced timeouts to catch before Gunicorn worker timeout (~30s)
+            # Timeouts set to allow complex queries while staying under Gunicorn timeout (120s)
+            # Total: 30s submit + 60s result = 90s (leaves 30s buffer for other operations)
             query_job = None
             try:
                 with ThreadPoolExecutor(max_workers=1) as executor:
                     # Submit the query in a thread with timeout
                     future_query = executor.submit(self.client.query, alert.sql)
-                    query_job = future_query.result(timeout=10)  # 10 seconds to submit query
+                    query_job = future_query.result(timeout=30)  # 30 seconds to submit query
                     
                     # Wait for query result with timeout
-                    future_result = executor.submit(query_job.result, timeout=20)
-                    results = future_result.result(timeout=20)  # 20 seconds to get result
+                    future_result = executor.submit(query_job.result, timeout=60)
+                    results = future_result.result(timeout=60)  # 60 seconds to get result
             except (FuturesTimeoutError, Exception) as timeout_error:
                 # Try to cancel the query job to free up resources
+                job_id = None
                 if query_job:
                     try:
+                        job_id = getattr(query_job, 'job_id', None)
                         query_job.cancel()
-                        self.logger.info(f"Cancelled timed-out alert query job for alert '{alert.name}' (ID: {alert.alert_id or 'N/A'})")
+                        self.logger.info(f"Cancelled timed-out alert query job for alert '{alert.name}' (ID: {alert.alert_id or 'N/A'})" + 
+                                       (f", BigQuery job_id: {job_id}" if job_id else ""))
                     except Exception as cancel_error:
                         self.logger.warning(f"Failed to cancel alert query job: {str(cancel_error)}")
                 
+                # Enhanced error logging with exception type and details
+                error_type = type(timeout_error).__name__
+                error_msg = str(timeout_error) if str(timeout_error) else repr(timeout_error)
+                job_id_str = f", BigQuery job_id: {job_id}" if job_id else ""
+                
                 self.logger.error(
-                    f"Alert query timed out for alert '{alert.name}' (ID: {alert.alert_id or 'N/A'}). "
-                    f"Alert execution failed. Error: {str(timeout_error)}"
+                    f"Alert query timed out for alert '{alert.name}' (ID: {alert.alert_id or 'N/A'}){job_id_str}. "
+                    f"Timeout after 30s submit + 60s result. Exception type: {error_type}, Error: {error_msg}"
                 )
                 
                 # Log the execution as failed
+                error_message = f"Query timeout after 90s total (30s submit + 60s result). Exception: {error_type}: {error_msg}"
                 logging_success = self.log_alert_execution(
                     alert, 
                     alert_generated=False, 
                     row_count=0,
-                    threshold=alert.threshold_for_alerting or 1,
+                    threshold=1,
                     success=False,
-                    error_message=f"Query timeout: {str(timeout_error)}"
+                    error_message=error_message
                 )
                 
                 return {
                     'success': False,
                     'row_count': 0,
-                    'threshold': alert.threshold_for_alerting or 1,
                     'alert_generated': False,
-                    'error': f"Query timeout: {str(timeout_error)}",
+                    'error': error_message,
                     'timestamp': datetime.now().isoformat(),
-                    'slack_channel': alert.slack_alert_channel,
                     'logging_success': logging_success
                 }
             
@@ -829,39 +887,46 @@ class AlertProcessor:
                 with ThreadPoolExecutor(max_workers=1) as executor:
                     # Convert results to list with timeout (this forces all pages to be fetched)
                     future_list = executor.submit(lambda: list(results))
-                    rows = future_list.result(timeout=30)  # 30 seconds to iterate/fetch all pages
+                    rows = future_list.result(timeout=60)  # 60 seconds to iterate/fetch all pages
             except (FuturesTimeoutError, Exception) as iteration_timeout:
                 # Try to cancel the query job to free up resources
+                job_id = None
                 if query_job:
                     try:
+                        job_id = getattr(query_job, 'job_id', None)
                         query_job.cancel()
-                        self.logger.info(f"Cancelled timed-out alert query job after iteration timeout for alert '{alert.name}' (ID: {alert.alert_id or 'N/A'})")
+                        self.logger.info(f"Cancelled timed-out alert query job after iteration timeout for alert '{alert.name}' (ID: {alert.alert_id or 'N/A'})" +
+                                       (f", BigQuery job_id: {job_id}" if job_id else ""))
                     except Exception as cancel_error:
                         self.logger.warning(f"Failed to cancel alert query job: {str(cancel_error)}")
                 
+                # Enhanced error logging with exception type and details
+                error_type = type(iteration_timeout).__name__
+                error_msg = str(iteration_timeout) if str(iteration_timeout) else repr(iteration_timeout)
+                job_id_str = f", BigQuery job_id: {job_id}" if job_id else ""
+                
                 self.logger.error(
-                    f"Alert query result iteration timed out for alert '{alert.name}' (ID: {alert.alert_id or 'N/A'}). "
-                    f"Alert execution failed. Error: {str(iteration_timeout)}"
+                    f"Alert query result iteration timed out for alert '{alert.name}' (ID: {alert.alert_id or 'N/A'}){job_id_str}. "
+                    f"Timeout after 60s iteration. Exception type: {error_type}, Error: {error_msg}"
                 )
                 
                 # Log the execution as failed
+                error_message = f"Result iteration timeout after 60s. Exception: {error_type}: {error_msg}"
                 logging_success = self.log_alert_execution(
                     alert, 
                     alert_generated=False, 
                     row_count=0,
-                    threshold=alert.threshold_for_alerting or 1,
+                    threshold=1,
                     success=False,
-                    error_message=f"Result iteration timeout: {str(iteration_timeout)}"
+                    error_message=error_message
                 )
                 
                 return {
                     'success': False,
                     'row_count': 0,
-                    'threshold': alert.threshold_for_alerting or 1,
                     'alert_generated': False,
-                    'error': f"Result iteration timeout: {str(iteration_timeout)}",
+                    'error': error_message,
                     'timestamp': datetime.now().isoformat(),
-                    'slack_channel': alert.slack_alert_channel,
                     'logging_success': logging_success
                 }
             
@@ -876,14 +941,14 @@ class AlertProcessor:
             self.logger.info(f"Alert ID: {alert.alert_id or 'N/A'}")
             self.logger.info(f"Alert Description: {alert.description}")
             self.logger.info(f"Alert Owner: {alert.owner or 'N/A'}")
-            self.logger.info(f"Slack Channel: {alert.slack_alert_channel}")
 
             # Log SQL query - single line with newlines removed
             self.logger.info(f"Alert SQL: {alert.sql.replace(newline, ' ').replace(carriage_return, ' ').strip()}")
 
             # Log configuration
-            self.logger.info(f"Threshold: {alert.threshold_for_alerting or 'N/A (using default of 1)'}")
-            self.logger.info(f"Max hourly alerts: {alert.max_hourly_alerts_per_day or 'Unlimited'}")
+            self.logger.info(f"Thresholds - Sandbox: {alert.threshold_sandbox or 'N/A'}, Non-Critical: {alert.threshold_non_critical or 'N/A'}, Critical: {alert.threshold_critical or 'N/A'}")
+            if alert.resolution == 'H':
+                self.logger.info(f"Max hourly alerts - Sandbox: {alert.max_hourly_alerts_sandbox or 'Unlimited'}, Non-Critical: {alert.max_hourly_alerts_non_critical or 'Unlimited'}, Critical: {alert.max_hourly_alerts_critical or 'Unlimited'}")
 
             # Log resolution - single line with newlines removed
             self.logger.info(f"Resolution: {alert.resolution.replace(newline, ' ').replace(carriage_return, ' ').strip()}")
@@ -894,17 +959,24 @@ class AlertProcessor:
             # Check if there are rows to analyze
             if row_count == 0:
                 self.logger.info("No rows returned - no alert will be generated")
-                # Log the execution
-                logging_success = self.log_alert_execution(alert, alert_generated=False, row_count=row_count, 
-                                       threshold=alert.threshold_for_alerting or 1)
+                # Log for all channels that have thresholds defined
+                channels_to_log = []
+                if alert.threshold_sandbox is not None:
+                    channels_to_log.append(('data-alerts-sandbox', alert.threshold_sandbox))
+                if alert.threshold_non_critical is not None:
+                    channels_to_log.append(('data-alerts-non-critical', alert.threshold_non_critical))
+                if alert.threshold_critical is not None:
+                    channels_to_log.append(('data-alerts-critical', alert.threshold_critical))
+                
+                for channel, threshold in channels_to_log:
+                    self.log_alert_execution(alert, alert_generated=False, row_count=row_count, threshold=threshold, channel=channel)
+                
                 return {
                     'success': True,
                     'row_count': 0,
-                    'threshold': alert.threshold_for_alerting or 1,
                     'alert_generated': False,
                     'timestamp': datetime.now().isoformat(),
-                    'slack_channel': alert.slack_alert_channel,
-                    'logging_success': logging_success
+                    'logging_success': True
                 }
             
             # Get the first row for analysis and reporting
@@ -914,76 +986,143 @@ class AlertProcessor:
             count_columns = [col for col in first_row.keys() if 'count' in col.lower()]
             if count_columns and all(first_row[col] == 0 for col in count_columns):
                 self.logger.info("Count query returned all zeros - no alert will be generated")
-                # Log the execution
-                logging_success = self.log_alert_execution(alert, alert_generated=False, row_count=row_count, 
-                                       threshold=alert.threshold_for_alerting or 1)
+                # Log for all channels that have thresholds defined
+                channels_to_log = []
+                if alert.threshold_sandbox is not None:
+                    channels_to_log.append(('data-alerts-sandbox', alert.threshold_sandbox))
+                if alert.threshold_non_critical is not None:
+                    channels_to_log.append(('data-alerts-non-critical', alert.threshold_non_critical))
+                if alert.threshold_critical is not None:
+                    channels_to_log.append(('data-alerts-critical', alert.threshold_critical))
+                
+                for channel, threshold in channels_to_log:
+                    self.log_alert_execution(alert, alert_generated=False, row_count=row_count, threshold=threshold, channel=channel)
+                
                 return {
                     'success': True,
                     'row_count': row_count,
                     'count_columns': count_columns,
                     'all_zeros': True,
-                    'threshold': alert.threshold_for_alerting or 1,
                     'alert_generated': False,
                     'timestamp': datetime.now().isoformat(),
-                    'slack_channel': alert.slack_alert_channel,
-                    'logging_success': logging_success
+                    'logging_success': True
                 }
             
-            # Determine if alert should be generated based on threshold logic
-            should_generate_alert = False
-            threshold = alert.threshold_for_alerting or 1  # Default to 1 if not specified
+            # Check which channels should receive alerts based on thresholds
+            channels_to_send = []
+            if alert.threshold_sandbox is not None and row_count >= alert.threshold_sandbox:
+                channels_to_send.append(('data-alerts-sandbox', alert.threshold_sandbox, alert.max_hourly_alerts_sandbox))
+            if alert.threshold_non_critical is not None and row_count >= alert.threshold_non_critical:
+                channels_to_send.append(('data-alerts-non-critical', alert.threshold_non_critical, alert.max_hourly_alerts_non_critical))
+            if alert.threshold_critical is not None and row_count >= alert.threshold_critical:
+                channels_to_send.append(('data-alerts-critical', alert.threshold_critical, alert.max_hourly_alerts_critical))
             
-            # Check row count against threshold (threshold applies only to number of rows returned)
-            if row_count >= threshold:
-                should_generate_alert = True
-            
-            slack_success = True
-            logging_success = True
-            
-            if should_generate_alert:
-                self.logger.info(f"Alert will be generated. Number of returned rows = {row_count}, threshold = {threshold}")
+            if channels_to_send:
+                self.logger.info(f"Alert will be generated. Number of returned rows = {row_count}")
+                self.logger.info(f"Channels to send: {[ch[0] for ch in channels_to_send]}")
                 self.logger.info(f"First row of results: {first_row}")
                 
-                message = self.format_slack_message(alert, row_count, first_row)
-                slack_success = self.send_to_slack(message, alert.slack_alert_channel)
+                channels_sent = []
+                channels_skipped_cooldown = []
                 
-                # Log the execution AFTER sending to Slack
-                logging_success = self.log_alert_execution(alert, alert_generated=True, row_count=row_count, 
-                                       threshold=threshold, success=slack_success)
+                # Send to each channel that meets threshold
+                for channel, threshold, max_hourly_alerts in channels_to_send:
+                    # Check cooldown for hourly alerts
+                    can_send = True
+                    if alert.resolution == 'H' and alert.alert_id and max_hourly_alerts is not None:
+                        can_send = self.check_hourly_alert_cooldown(alert, channel, max_hourly_alerts)
+                        if not can_send:
+                            self.logger.info(f"Alert '{alert.name}' is in cooldown for channel {channel} - will not be sent")
+                            self.log_alert_execution(alert, alert_generated=False, row_count=row_count, 
+                                       threshold=threshold, channel=channel, success=True, 
+                                       error_message="Skipped due to cooldown")
+                            channels_skipped_cooldown.append(channel)
+                            continue
+                    
+                    # Send alert to Slack
+                    message = self.format_slack_message(alert, row_count, first_row, channel, threshold)
+                    slack_success = self.send_to_slack(message, channel)
+                    
+                    # Log the execution AFTER sending to Slack
+                    logging_success = self.log_alert_execution(
+                        alert, 
+                        alert_generated=True, 
+                        row_count=row_count, 
+                        threshold=threshold, 
+                        channel=channel,
+                        success=slack_success
+                    )
+                    
+                    if logging_success:
+                        self.logger.info(f"✅ Alert execution logged successfully for '{alert.name}' channel {channel} with alert_generated=True")
+                    else:
+                        self.logger.error(f"❌ Failed to log alert execution for '{alert.name}' channel {channel}")
+                    
+                    if slack_success:
+                        self.logger.info(f"✅ Alert sent successfully to {channel}")
+                        channels_sent.append(channel)
+                    else:
+                        self.logger.error(f"❌ Failed to send alert to {channel}")
                 
-                if logging_success:
-                    self.logger.info(f"✅ Alert execution logged successfully for '{alert.name}' with alert_generated=True")
-                else:
-                    self.logger.error(f"❌ Failed to log alert execution for '{alert.name}'")
+                return {
+                    'success': True,
+                    'row_count': row_count,
+                    'alert_generated': len(channels_sent) > 0,
+                    'channels_sent': channels_sent,
+                    'channels_skipped_cooldown': channels_skipped_cooldown,
+                    'timestamp': datetime.now().isoformat(),
+                    'logging_success': True
+                }
             else:
-                self.logger.info(f"Alert will not be generated. Values do not meet threshold = {threshold}")
-                # Log the execution
-                logging_success = self.log_alert_execution(alert, alert_generated=False, row_count=row_count, 
-                                       threshold=threshold)
-            
-            return {
-                'success': True,
-                'row_count': row_count,
-                'threshold': threshold,
-                'alert_generated': should_generate_alert,
-                'max_hourly_alerts_per_day': alert.max_hourly_alerts_per_day,
-                'timestamp': datetime.now().isoformat(),
-                'slack_channel': alert.slack_alert_channel,
-                'slack_success': slack_success,
-                'logging_success': logging_success
-            }
+                # No thresholds met - log for all channels that have thresholds defined
+                channels_to_log = []
+                if alert.threshold_sandbox is not None:
+                    channels_to_log.append(('data-alerts-sandbox', alert.threshold_sandbox))
+                if alert.threshold_non_critical is not None:
+                    channels_to_log.append(('data-alerts-non-critical', alert.threshold_non_critical))
+                if alert.threshold_critical is not None:
+                    channels_to_log.append(('data-alerts-critical', alert.threshold_critical))
+                
+                threshold_info = ', '.join([f"{ch[0]}: {ch[1]}" for ch in channels_to_log])
+                self.logger.info(f"Alert will not be generated. Row count {row_count} does not meet any threshold. Thresholds: {threshold_info}")
+                
+                for channel, threshold in channels_to_log:
+                    self.log_alert_execution(alert, alert_generated=False, row_count=row_count, 
+                               threshold=threshold, channel=channel)
+                
+                return {
+                    'success': True,
+                    'row_count': row_count,
+                    'alert_generated': False,
+                    'timestamp': datetime.now().isoformat(),
+                    'logging_success': True
+                }
             
         except Exception as e:
             error_msg = f"Error processing alert '{alert.name}': {str(e)}"
             self.logger.error(error_msg)
-            # Log the execution with error
-            logging_success = self.log_alert_execution(alert, alert_generated=False, success=False, error_message=str(e))
+            # Log the execution with error for all channels that have thresholds defined
+            channels_to_log = []
+            if alert.threshold_sandbox is not None:
+                channels_to_log.append(('data-alerts-sandbox', alert.threshold_sandbox))
+            if alert.threshold_non_critical is not None:
+                channels_to_log.append(('data-alerts-non-critical', alert.threshold_non_critical))
+            if alert.threshold_critical is not None:
+                channels_to_log.append(('data-alerts-critical', alert.threshold_critical))
+            
+            # If no channels defined, use a default channel for logging
+            if not channels_to_log:
+                channels_to_log = [('data-alerts-sandbox', 1)]
+            
+            for channel, threshold in channels_to_log:
+                self.log_alert_execution(alert, alert_generated=False, row_count=None, 
+                           threshold=threshold, channel=channel, success=False, error_message=str(e))
+            
             return {
                 'success': False,
                 'error': error_msg,
                 'timestamp': datetime.now().isoformat(),
-                'slack_channel': alert.slack_alert_channel,
-                'logging_success': logging_success
+                'logging_success': True
             }
 
     def process_all_alerts(self) -> list:
@@ -1025,8 +1164,9 @@ def run_alerts(request):
     try:
         # Get resolution from query parameters if specified
         resolution = request.args.get('resolution')
-        # Test mode is disabled for Cloud Run (production only)
-        processor = AlertProcessor(resolution, test_mode=False)
+        # Check TEST_MODE environment variable for Cloud Run
+        test_mode = is_test_mode()
+        processor = AlertProcessor(resolution, test_mode=test_mode)
         results = processor.process_all_alerts()
         logger.info("Alert Processor Cloud Run Function completed successfully")
         

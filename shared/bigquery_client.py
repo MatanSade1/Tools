@@ -2,14 +2,38 @@
 from typing import List, Dict, Optional
 from google.cloud import bigquery
 from google.cloud.exceptions import NotFound
+import google.auth
+from google.auth.transport.requests import Request
 import json
 from datetime import datetime, timedelta, date
 from shared.config import get_config
 
 
 def get_bigquery_client():
-    """Get BigQuery client instance."""
-    return bigquery.Client(project=get_config()["gcp_project_id"])
+    """
+    Get BigQuery client instance with Drive readonly scope for external tables.
+    
+    This includes the Drive readonly scope to allow access to Google Sheets
+    that are used as external tables in BigQuery (e.g., fraudsters_exclusion_list).
+    """
+    try:
+        # Add Drive readonly scope for accessing Google Sheets external tables
+        credentials, project = google.auth.default(
+            scopes=[
+                "https://www.googleapis.com/auth/cloud-platform",
+                "https://www.googleapis.com/auth/drive.readonly",
+                "https://www.googleapis.com/auth/bigquery"
+            ]
+        )
+        # Refresh credentials to ensure scopes are applied
+        credentials.refresh(Request())
+        
+        # Use project from credentials or fallback to config
+        project_id = project or get_config()["gcp_project_id"]
+        return bigquery.Client(credentials=credentials, project=project_id)
+    except Exception as e:
+        # Fallback to default credentials if scope setup fails
+        return bigquery.Client(project=get_config()["gcp_project_id"])
 
 
 def ensure_table_exists():
@@ -412,7 +436,7 @@ def ensure_gdpr_table_exists():
         
         # Check if new columns need to be added
         existing_fields = {field.name for field in existing_table.schema}
-        required_fields = {"install_date", "last_activity_date"}
+        required_fields = {"install_date", "last_activity_date", "max_mediation_deletion_status"}
         missing_fields = required_fields - existing_fields
         
         if missing_fields:
@@ -423,6 +447,8 @@ def ensure_gdpr_table_exists():
                 new_schema.append(bigquery.SchemaField("install_date", "DATE", mode="NULLABLE"))
             if "last_activity_date" not in existing_fields:
                 new_schema.append(bigquery.SchemaField("last_activity_date", "DATE", mode="NULLABLE"))
+            if "max_mediation_deletion_status" not in existing_fields:
+                new_schema.append(bigquery.SchemaField("max_mediation_deletion_status", "STRING", mode="NULLABLE"))
             
             existing_table.schema = new_schema
             client.update_table(existing_table, ["schema"])
@@ -436,6 +462,7 @@ def ensure_gdpr_table_exists():
             bigquery.SchemaField("mixpanel_deletion_status", "STRING", mode="NULLABLE"),
             bigquery.SchemaField("singular_request_id", "STRING", mode="NULLABLE"),
             bigquery.SchemaField("singular_deletion_status", "STRING", mode="NULLABLE"),
+            bigquery.SchemaField("max_mediation_deletion_status", "STRING", mode="NULLABLE"),
             bigquery.SchemaField("bigquery_deletion_status", "STRING", mode="NULLABLE"),
             bigquery.SchemaField("game_state_status", "STRING", mode="NULLABLE"),
             bigquery.SchemaField("is_request_completed", "BOOLEAN", mode="NULLABLE"),
@@ -502,6 +529,7 @@ def insert_gdpr_requests(requests: List[Dict]):
             - mixpanel_deletion_status: "completed" or "pending" (default: "pending")
             - singular_request_id: Singular deletion request ID (optional)
             - singular_deletion_status: "completed" or "pending" (default: "pending")
+            - max_mediation_deletion_status: "completed" or "pending" or "not started" (default: "not started")
             - bigquery_deletion_status: "completed" or "not started" (default: "not started")
             - game_state_status: "completed" or "not started" (default: "not started")
             - is_request_completed: Boolean (default: False)
@@ -574,6 +602,7 @@ def insert_gdpr_requests(requests: List[Dict]):
             "mixpanel_deletion_status": req.get("mixpanel_deletion_status", "pending"),
             "singular_request_id": req.get("singular_request_id"),
             "singular_deletion_status": req.get("singular_deletion_status", "pending"),
+            "max_mediation_deletion_status": req.get("max_mediation_deletion_status", "not started"),
             "bigquery_deletion_status": req.get("bigquery_deletion_status", "not started"),
             "game_state_status": req.get("game_state_status", "not started"),
             "is_request_completed": req.get("is_request_completed", False),
@@ -591,4 +620,196 @@ def insert_gdpr_requests(requests: List[Dict]):
         raise Exception(f"Error inserting rows: {errors}")
     
     print(f"Successfully inserted {len(rows_to_insert)} GDPR deletion requests into {project_id}.{dataset_id}.{table_id}")
+
+
+def get_gdpr_request_by_ticket_id(ticket_id: str) -> Optional[Dict]:
+    """
+    Get GDPR request record by ticket_id.
+    
+    Args:
+        ticket_id: Ticket ID to search for
+    
+    Returns:
+        Dictionary with record data or None if not found
+    """
+    client = get_bigquery_client()
+    
+    query = f"""
+    SELECT 
+        distinct_id,
+        ticket_id,
+        mixpanel_request_id,
+        mixpanel_deletion_status,
+        singular_request_id,
+        singular_deletion_status,
+        max_mediation_deletion_status,
+        bigquery_deletion_status,
+        game_state_status,
+        is_request_completed,
+        slack_message_ts
+    FROM `yotam-395120.peerplay.personal_data_deletion_tool`
+    WHERE ticket_id = '{ticket_id}'
+    ORDER BY inserted_at DESC
+    LIMIT 1
+    """
+    
+    try:
+        results = client.query(query).result()
+        for row in results:
+            return {
+                "distinct_id": row.distinct_id,
+                "ticket_id": row.ticket_id,
+                "mixpanel_request_id": row.mixpanel_request_id,
+                "mixpanel_deletion_status": row.mixpanel_deletion_status,
+                "singular_request_id": row.singular_request_id,
+                "singular_deletion_status": row.singular_deletion_status,
+                "max_mediation_deletion_status": row.max_mediation_deletion_status,
+                "bigquery_deletion_status": row.bigquery_deletion_status,
+                "game_state_status": row.game_state_status,
+                "is_request_completed": row.is_request_completed,
+                "slack_message_ts": row.slack_message_ts,
+            }
+        return None
+    except Exception as e:
+        print(f"❌ Error fetching record for ticket {ticket_id}: {e}")
+        return None
+
+
+def get_gdpr_requests_by_ticket_ids(ticket_ids: List[str]) -> Dict[str, Dict]:
+    """
+    Get GDPR request records by multiple ticket_ids in a single query.
+    
+    Args:
+        ticket_ids: List of ticket IDs to search for
+    
+    Returns:
+        Dictionary mapping ticket_id to record data
+    """
+    if not ticket_ids:
+        return {}
+    
+    client = get_bigquery_client()
+    
+    # Build query with IN clause
+    # Use subquery to get latest record per ticket_id
+    ticket_ids_str = "', '".join(ticket_ids)
+    query = f"""
+    SELECT 
+        distinct_id,
+        ticket_id,
+        mixpanel_request_id,
+        mixpanel_deletion_status,
+        singular_request_id,
+        singular_deletion_status,
+        max_mediation_deletion_status,
+        bigquery_deletion_status,
+        game_state_status,
+        is_request_completed,
+        slack_message_ts
+    FROM (
+        SELECT 
+            distinct_id,
+            ticket_id,
+            mixpanel_request_id,
+            mixpanel_deletion_status,
+            singular_request_id,
+            singular_deletion_status,
+            max_mediation_deletion_status,
+            bigquery_deletion_status,
+            game_state_status,
+            is_request_completed,
+            slack_message_ts,
+            ROW_NUMBER() OVER (PARTITION BY ticket_id ORDER BY inserted_at DESC) as rn
+        FROM `yotam-395120.peerplay.personal_data_deletion_tool`
+        WHERE ticket_id IN ('{ticket_ids_str}')
+    )
+    WHERE rn = 1
+    """
+    
+    try:
+        results = client.query(query).result()
+        records = {}
+        for row in results:
+            records[row.ticket_id] = {
+                "distinct_id": row.distinct_id,
+                "ticket_id": row.ticket_id,
+                "mixpanel_request_id": row.mixpanel_request_id,
+                "mixpanel_deletion_status": row.mixpanel_deletion_status,
+                "singular_request_id": row.singular_request_id,
+                "singular_deletion_status": row.singular_deletion_status,
+                "max_mediation_deletion_status": row.max_mediation_deletion_status,
+                "bigquery_deletion_status": row.bigquery_deletion_status,
+                "game_state_status": row.game_state_status,
+                "is_request_completed": row.is_request_completed,
+                "slack_message_ts": row.slack_message_ts,
+            }
+        return records
+    except Exception as e:
+        print(f"❌ Error fetching records for tickets: {e}")
+        return {}
+
+
+def update_gdpr_request_status(
+    ticket_id: str,
+    mixpanel_status: Optional[str] = None,
+    singular_status: Optional[str] = None,
+    max_mediation_status: Optional[str] = None,
+    is_request_completed: Optional[bool] = None
+) -> bool:
+    """
+    Update GDPR request status in BigQuery.
+    
+    Args:
+        ticket_id: Ticket ID to identify the record
+        mixpanel_status: New mixpanel_deletion_status (optional)
+        singular_status: New singular_deletion_status (optional)
+        max_mediation_status: New max_mediation_deletion_status (optional)
+        is_request_completed: New is_request_completed value (optional)
+    
+    Returns:
+        True if update successful, False otherwise
+    """
+    from datetime import datetime
+    
+    client = get_bigquery_client()
+    
+    # Always update last_check_time when updating status (opened, checked, or completed)
+    current_timestamp = datetime.utcnow().isoformat()
+    
+    # Build UPDATE query
+    updates = []
+    if mixpanel_status:
+        updates.append(f"mixpanel_deletion_status = '{mixpanel_status}'")
+    if singular_status:
+        updates.append(f"singular_deletion_status = '{singular_status}'")
+    if max_mediation_status:
+        updates.append(f"max_mediation_deletion_status = '{max_mediation_status}'")
+    if is_request_completed is not None:
+        updates.append(f"is_request_completed = {is_request_completed}")
+    
+    # Always update last_check_time when any status is updated
+    updates.append(f"last_check_time = TIMESTAMP('{current_timestamp}')")
+    
+    if not updates:
+        return False
+    
+    query = f"""
+    UPDATE `yotam-395120.peerplay.personal_data_deletion_tool`
+    SET {', '.join(updates)}
+    WHERE ticket_id = '{ticket_id}'
+    """
+    
+    try:
+        query_job = client.query(query)
+        query_job.result()  # Wait for completion
+        print(f"✅ Updated BigQuery record for ticket {ticket_id}")
+        return True
+    except Exception as e:
+        error_msg = str(e)
+        if 'streaming buffer' in error_msg.lower():
+            print(f"⚠️  Cannot update immediately - record for ticket {ticket_id} is in streaming buffer")
+            print(f"   Update will be retried later or can be done manually")
+        else:
+            print(f"❌ Error updating BigQuery record for ticket {ticket_id}: {e}")
+        return False
 

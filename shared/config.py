@@ -168,6 +168,16 @@ def get_config() -> Dict:
     if not singular_api_secret:
         singular_api_secret = os.getenv("SINGULAR_API_SECRET")
     
+    # AppLovin Max GDPR API key (for GDPR deletion requests)
+    applovin_gdpr_api_key_name = os.getenv("APPLOVIN_GDPR_API_KEY_NAME")
+    applovin_gdpr_api_key = None
+    if applovin_gdpr_api_key_name and project_id:
+        applovin_gdpr_api_key = get_secret(applovin_gdpr_api_key_name, project_id)
+    
+    # Fall back to environment variable
+    if not applovin_gdpr_api_key:
+        applovin_gdpr_api_key = os.getenv("APPLOVIN_GDPR_API_KEY")
+    
     return {
         "mixpanel_api_secret": mixpanel_api_secret,
         "mixpanel_service_account_username": service_account_username,
@@ -184,6 +194,7 @@ def get_config() -> Dict:
         "gdpr_slack_channel": os.getenv("GDPR_SLACK_CHANNEL", "users-to-delete-their-personal-data"),
         "singular_api_key": singular_api_key,
         "singular_api_secret": singular_api_secret,
+        "applovin_gdpr_api_key": applovin_gdpr_api_key,
     }
 
 

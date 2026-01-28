@@ -1,0 +1,206 @@
+{
+  "dashboard_config": {
+    "title": "Fraudsters Management Dashboard",
+    "description": "Comprehensive dashboard for monitoring and analyzing fraudster detection and management",
+    "created_at": "2025-12-06T21:12:44.216393",
+    "data_sources": [
+      {
+        "name": "Potential Fraudsters",
+        "connector": "bigquery",
+        "table": "yotam-395120.peerplay.potential_fraudsters",
+        "type": "BIGQUERY",
+        "projectId": "yotam-395120",
+        "datasetId": "peerplay",
+        "tableId": "potential_fraudsters"
+      },
+      {
+        "name": "Fraudsters",
+        "connector": "bigquery",
+        "table": "yotam-395120.peerplay.fraudsters",
+        "type": "BIGQUERY",
+        "projectId": "yotam-395120",
+        "datasetId": "peerplay",
+        "tableId": "fraudsters"
+      },
+      {
+        "name": "Offer Wall Progression Cheaters",
+        "connector": "bigquery",
+        "table": "yotam-395120.peerplay.offer_wall_progression_cheaters",
+        "type": "BIGQUERY",
+        "projectId": "yotam-395120",
+        "datasetId": "peerplay",
+        "tableId": "offer_wall_progression_cheaters"
+      },
+      {
+        "name": "Dim Player",
+        "connector": "bigquery",
+        "table": "yotam-395120.peerplay.dim_player",
+        "type": "BIGQUERY",
+        "projectId": "yotam-395120",
+        "datasetId": "peerplay",
+        "tableId": "dim_player"
+      }
+    ],
+    "pages": [
+      {
+        "name": "Overview",
+        "description": "High-level fraudster metrics and trends",
+        "charts": [
+          {
+            "type": "scorecard",
+            "title": "Total Fraudsters",
+            "metric": "COUNT_DISTINCT(distinct_id)",
+            "data_source": "fraudsters"
+          },
+          {
+            "type": "scorecard",
+            "title": "Potential Fraudsters",
+            "metric": "COUNT_DISTINCT(distinct_id)",
+            "data_source": "potential_fraudsters"
+          },
+          {
+            "type": "scorecard",
+            "title": "Offerwall Cheaters",
+            "metric": "COUNT_DISTINCT(distinct_id)",
+            "data_source": "offer_wall_progression_cheaters"
+          },
+          {
+            "type": "time_series",
+            "title": "Fraudsters Over Time",
+            "dimension": "date",
+            "metric": "COUNT_DISTINCT(distinct_id)",
+            "data_source": "fraudsters"
+          }
+        ]
+      },
+      {
+        "name": "Fraud Flags Analysis",
+        "description": "Breakdown of fraud detection flags",
+        "charts": [
+          {
+            "type": "bar_chart",
+            "title": "Fraud Flags Distribution",
+            "dimension": "flag_type",
+            "metric": "COUNT(distinct_id)",
+            "data_source": "fraudsters"
+          },
+          {
+            "type": "pie_chart",
+            "title": "Manual vs Automated Detection",
+            "dimension": "detection_type",
+            "metric": "COUNT(distinct_id)",
+            "data_source": "fraudsters"
+          },
+          {
+            "type": "table",
+            "title": "Top Fraud Flags",
+            "dimensions": [
+              "flag_type",
+              "distinct_id"
+            ],
+            "metrics": [
+              "count"
+            ],
+            "data_source": "fraudsters"
+          }
+        ]
+      },
+      {
+        "name": "Platform Analysis",
+        "description": "Fraudster analysis by platform",
+        "charts": [
+          {
+            "type": "bar_chart",
+            "title": "Fraudsters by Platform",
+            "dimension": "platform",
+            "metric": "COUNT_DISTINCT(distinct_id)",
+            "data_source": "fraudsters"
+          },
+          {
+            "type": "geo_chart",
+            "title": "Fraudsters by Country",
+            "dimension": "country",
+            "metric": "COUNT_DISTINCT(distinct_id)",
+            "data_source": "fraudsters"
+          }
+        ]
+      },
+      {
+        "name": "Detailed View",
+        "description": "Detailed fraudster records and analysis",
+        "charts": [
+          {
+            "type": "table",
+            "title": "Fraudster Details",
+            "dimensions": [
+              "distinct_id",
+              "platform",
+              "country",
+              "install_date"
+            ],
+            "metrics": [
+              "total_fraud_flags",
+              "manual_identification_fraud_purchase_flag"
+            ],
+            "data_source": "fraudsters"
+          }
+        ]
+      }
+    ],
+    "filters": [
+      {
+        "name": "Date Range",
+        "type": "date_range",
+        "field": "date"
+      },
+      {
+        "name": "Platform",
+        "type": "dropdown",
+        "field": "platform"
+      },
+      {
+        "name": "Fraud Flag",
+        "type": "dropdown",
+        "field": "flag_type"
+      }
+    ]
+  },
+  "sql_queries": {
+    "total_fraudsters": "\n                SELECT COUNT(DISTINCT distinct_id) as total_fraudsters\n                FROM `yotam-395120.peerplay.fraudsters`\n            ",
+    "fraudsters_over_time": "\n                SELECT \n                    DATE(inserted_at) as date,\n                    COUNT(DISTINCT distinct_id) as fraudster_count\n                FROM `yotam-395120.peerplay.fraudsters`\n                WHERE inserted_at >= DATE_SUB(CURRENT_DATE(), INTERVAL 90 DAY)\n                GROUP BY date\n                ORDER BY date\n            ",
+    "fraud_flags_breakdown": "\n                SELECT \n                    CASE \n                        WHEN manual_identification_fraud_purchase_flag = 1 THEN 'Manual Identification'\n                        WHEN fast_progression_flag = 1 THEN 'Fast Progression'\n                        WHEN excessive_harvests_flag = 1 THEN 'Excessive Harvests'\n                        WHEN suspicious_purchase_flag = 1 THEN 'Suspicious Purchase'\n                        WHEN rapid_purchases_flag = 1 THEN 'Rapid Purchases'\n                        WHEN purchase_flow_anomaly_flag = 1 THEN 'Purchase Flow Anomaly'\n                        WHEN high_balance_flag = 1 THEN 'High Balance'\n                        WHEN negative_balance_flag = 1 THEN 'Negative Balance'\n                        WHEN large_jump_flag = 1 THEN 'Large Jump'\n                        WHEN privacy_abandonment_flag = 1 THEN 'Privacy Abandonment'\n                        WHEN rapid_chapter_progression_flag = 1 THEN 'Rapid Chapter Progression'\n                        WHEN refund_abuse_flag = 1 THEN 'Refund Abuse'\n                        WHEN high_tutorial_balance_flag = 1 THEN 'High Tutorial Balance'\n                        WHEN multiple_chapter1_purchases_flag = 1 THEN 'Multiple Chapter 1 Purchases'\n                        WHEN duplicate_transaction_flag = 1 THEN 'Duplicate Transaction'\n                        ELSE 'Other'\n                    END as flag_type,\n                    COUNT(DISTINCT distinct_id) as count\n                FROM `yotam-395120.peerplay.fraudsters`\n                GROUP BY flag_type\n                ORDER BY count DESC\n            ",
+    "platform_breakdown": "\n                SELECT \n                    COALESCE(dp.first_platform, 'Unknown') as platform,\n                    COUNT(DISTINCT f.distinct_id) as fraudster_count\n                FROM `yotam-395120.peerplay.fraudsters` f\n                LEFT JOIN `yotam-395120.peerplay.dim_player` dp ON f.distinct_id = dp.distinct_id\n                GROUP BY platform\n                ORDER BY fraudster_count DESC\n            ",
+    "fraudsters_by_country": "\n                SELECT \n                    COALESCE(pf.first_country, 'Unknown') as country,\n                    COUNT(DISTINCT f.distinct_id) as fraudster_count\n                FROM `yotam-395120.peerplay.fraudsters` f\n                LEFT JOIN `yotam-395120.peerplay.potential_fraudsters` pf ON f.distinct_id = pf.distinct_id\n                GROUP BY country\n                ORDER BY fraudster_count DESC\n                LIMIT 20\n            ",
+    "manual_vs_automated": "\n                SELECT \n                    CASE \n                        WHEN manual_identification_fraud_purchase_flag = 1 THEN 'Manual Detection'\n                        ELSE 'Automated Detection'\n                    END as detection_type,\n                    COUNT(DISTINCT distinct_id) as count\n                FROM `yotam-395120.peerplay.fraudsters`\n                GROUP BY detection_type\n            ",
+    "recent_fraudsters": "\n                SELECT \n                    f.distinct_id,\n                    COALESCE(dp.first_platform, 'Unknown') as platform,\n                    COALESCE(pf.first_country, 'Unknown') as country,\n                    dp.install_date,\n                    f.manual_identification_fraud_purchase_flag,\n                    (f.fast_progression_flag + f.excessive_harvests_flag + \n                     f.suspicious_purchase_flag + f.rapid_purchases_flag +\n                     f.purchase_flow_anomaly_flag + f.high_balance_flag +\n                     f.negative_balance_flag + f.large_jump_flag +\n                     f.privacy_abandonment_flag + f.rapid_chapter_progression_flag +\n                     f.refund_abuse_flag + f.high_tutorial_balance_flag +\n                     f.multiple_chapter1_purchases_flag + f.duplicate_transaction_flag) as total_flags\n                FROM `yotam-395120.peerplay.fraudsters` f\n                LEFT JOIN `yotam-395120.peerplay.dim_player` dp ON f.distinct_id = dp.distinct_id\n                LEFT JOIN `yotam-395120.peerplay.potential_fraudsters` pf ON f.distinct_id = pf.distinct_id\n                ORDER BY f.inserted_at DESC\n                LIMIT 1000\n            "
+  },
+  "data_sources": [
+    {
+      "name": "Potential Fraudsters",
+      "table_id": "potential_fraudsters",
+      "full_table_id": "yotam-395120.peerplay.potential_fraudsters"
+    },
+    {
+      "name": "Fraudsters",
+      "table_id": "fraudsters",
+      "full_table_id": "yotam-395120.peerplay.fraudsters"
+    },
+    {
+      "name": "Offer Wall Progression Cheaters",
+      "table_id": "offer_wall_progression_cheaters",
+      "full_table_id": "yotam-395120.peerplay.offer_wall_progression_cheaters"
+    },
+    {
+      "name": "Dim Player",
+      "table_id": "dim_player",
+      "full_table_id": "yotam-395120.peerplay.dim_player"
+    }
+  ],
+  "instructions": {
+    "step1": "Open Looker Studio (https://lookerstudio.google.com)",
+    "step2": "Create a new report",
+    "step3": "Add BigQuery data sources using the table IDs provided",
+    "step4": "Use the SQL queries provided to create custom charts",
+    "step5": "Organize charts according to the pages defined in dashboard_config"
+  }
+}

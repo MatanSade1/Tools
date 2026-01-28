@@ -29,11 +29,17 @@ def get_version_row_count(client: bigquery.Client, version: str, start_date: str
         # If version can't be converted to float, use string comparison
         version_filter = f"CAST(version_float AS STRING) = '{version}'"
     
+    # Exclusion filters for counting
+    country_exclusion = " AND mp_country_code NOT IN ('IL', 'UA', 'AM')"
+    fraudster_exclusion = " AND distinct_id NOT IN (SELECT DISTINCT distinct_id FROM `peerplay.potential_fraudsters`)"
+    exclusion_filters = country_exclusion + fraudster_exclusion
+    
     query = f"""
     SELECT COUNT(*) as count
     FROM `{project_id}.{dataset_id}.{table_id}`
     WHERE {version_filter}
       AND date BETWEEN '{start_date}' AND '{end_date}'
+      {exclusion_filters}
     """
     
     count_df = client.query(query).result().to_dataframe()
@@ -100,6 +106,11 @@ def extract_data_from_bigquery(old_version: str, new_version: str, start_date: s
     
     date_filter = f" AND date BETWEEN '{start_date}' AND '{end_date}'"
     
+    # Exclusion filters
+    country_exclusion = " AND mp_country_code NOT IN ('IL', 'UA', 'AM')"
+    fraudster_exclusion = " AND distinct_id NOT IN (SELECT DISTINCT distinct_id FROM `peerplay.potential_fraudsters`)"
+    exclusion_filters = country_exclusion + fraudster_exclusion
+    
     # Helper function to create version filter
     def get_version_filter(version: str) -> str:
         try:
@@ -126,6 +137,7 @@ def extract_data_from_bigquery(old_version: str, new_version: str, start_date: s
             WHERE {old_version_filter}
               AND mp_event_name = 'purchase_successful'
               {date_filter}
+              {exclusion_filters}
         ),
         OldVersionOtherSample AS (
             SELECT *, '{old_version}' as source_version, 'sampled' as sample_type
@@ -134,6 +146,7 @@ def extract_data_from_bigquery(old_version: str, new_version: str, start_date: s
               AND mp_event_name != 'purchase_successful'
               AND MOD(ABS(FARM_FINGERPRINT(CAST(res_timestamp AS STRING))), {old_denominator}) = 0
               {date_filter}
+              {exclusion_filters}
             LIMIT {target_sample_size}
         ),
         NewVersionPurchases AS (
@@ -142,6 +155,7 @@ def extract_data_from_bigquery(old_version: str, new_version: str, start_date: s
             WHERE {new_version_filter}
               AND mp_event_name = 'purchase_successful'
               {date_filter}
+              {exclusion_filters}
         ),
         NewVersionOtherSample AS (
             SELECT *, '{new_version}' as source_version, 'sampled' as sample_type
@@ -150,6 +164,7 @@ def extract_data_from_bigquery(old_version: str, new_version: str, start_date: s
               AND mp_event_name != 'purchase_successful'
               AND MOD(ABS(FARM_FINGERPRINT(CAST(res_timestamp AS STRING))), {new_denominator}) = 0
               {date_filter}
+              {exclusion_filters}
             LIMIT {target_sample_size}
         )
         SELECT * FROM OldVersionPurchases
@@ -169,6 +184,7 @@ def extract_data_from_bigquery(old_version: str, new_version: str, start_date: s
             WHERE {old_version_filter}
               AND MOD(ABS(FARM_FINGERPRINT(CAST(res_timestamp AS STRING))), {old_denominator}) = 0
               {date_filter}
+              {exclusion_filters}
             LIMIT {target_sample_size}
         ),
         NewVersionSample AS (
@@ -177,6 +193,7 @@ def extract_data_from_bigquery(old_version: str, new_version: str, start_date: s
             WHERE {new_version_filter}
               AND MOD(ABS(FARM_FINGERPRINT(CAST(res_timestamp AS STRING))), {new_denominator}) = 0
               {date_filter}
+              {exclusion_filters}
             LIMIT {target_sample_size}
         )
         SELECT * FROM OldVersionSample

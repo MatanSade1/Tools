@@ -1,6 +1,7 @@
 """Google Sheets client for reading configuration."""
 import os
 import json
+import logging
 from typing import Dict, List, Optional
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
@@ -28,7 +29,7 @@ def get_sheets_service():
         # Otherwise use Application Default Credentials (works in Cloud Functions)
         return build('sheets', 'v4')
     except Exception as e:
-        print(f"Error creating Sheets service: {e}")
+        logging.error(f"Error creating Sheets service: {e}")
         raise
 
 
@@ -55,10 +56,10 @@ def read_config_from_sheets(spreadsheet_id: str, range_name: str = "Sheet1!A:Z")
         print(f"Read {len(values)} rows from spreadsheet")
         return values
     except HttpError as error:
-        print(f"Error reading from Google Sheets: {error}")
+        logging.error(f"Error reading from Google Sheets: {error}")
         raise
     except Exception as e:
-        print(f"Unexpected error reading from Google Sheets: {e}")
+        logging.error(f"Unexpected error reading from Google Sheets: {e}")
         raise
 
 
@@ -134,7 +135,7 @@ def parse_sheets_config_to_json(rows: List[List]) -> Dict:
             if event_name_idx < len(row) and row[event_name_idx]:
                 event['name'] = str(row[event_name_idx]).strip()
             else:
-                print(f"Warning: Row {row_idx} missing event_name, skipping")
+                logging.warning(f"Row {row_idx} missing event_name, skipping")
                 continue
         else:
             # Try to find event name in first column if not explicitly found
@@ -142,7 +143,7 @@ def parse_sheets_config_to_json(rows: List[List]) -> Dict:
                 event['name'] = str(row[0]).strip()
                 print(f"Using first column as event_name for row {row_idx}: {event['name']}")
             else:
-                print(f"Warning: Row {row_idx} missing event_name, skipping")
+                logging.warning(f"Row {row_idx} missing event_name, skipping")
                 continue
         
         # Optional: enabled (default: true)
@@ -173,10 +174,10 @@ def parse_sheets_config_to_json(rows: List[List]) -> Dict:
                 try:
                     event['alert_threshold'] = float(row[threshold_idx])
                 except (ValueError, TypeError):
-                    print(f"Warning: Row {row_idx} has invalid alert_threshold, skipping")
+                    logging.warning(f"Row {row_idx} has invalid alert_threshold, skipping")
                     continue
             else:
-                print(f"Warning: Row {row_idx} missing alert_threshold, skipping")
+                logging.warning(f"Row {row_idx} missing alert_threshold, skipping")
                 continue
         else:
             raise ValueError("Spreadsheet must have an 'alert_threshold' or 'Alert Threshold' column")
@@ -395,7 +396,7 @@ def get_config_from_sheets(
     validation_errors = validate_sheets_config(rows, col_map)
     
     if validation_errors:
-        print(f"⚠️  Found {len(validation_errors)} validation errors in spreadsheet")
+        logging.warning(f"Found {len(validation_errors)} validation errors in spreadsheet")
         
         # Get alert recipients from environment variable
         alert_recipients_str = os.getenv("RT_MP_VALIDATION_ALERT_RECIPIENTS", "matan.sade@peerplay.com")
@@ -406,7 +407,7 @@ def get_config_from_sheets(
             from shared.slack_client import send_validation_errors_dm
             send_validation_errors_dm(validation_errors, alert_recipients)
         except Exception as e:
-            print(f"Warning: Failed to send validation error DMs: {e}")
+            logging.warning(f"Failed to send validation error DMs: {e}")
         
         # Still parse and return config (with errors), but log them
         print("Continuing with configuration despite validation errors")

@@ -1,0 +1,23 @@
+{
+  "pinecone": {
+    "index_name": "bq-query-knowledge",
+    "dimension": 3072,
+    "metric": "cosine",
+    "cloud": "aws",
+    "region": "us-east-1"
+  },
+  "embeddings": {
+    "model": "text-embedding-3-large",
+    "chunk_size": 1000,
+    "chunk_overlap": 200
+  },
+  "llm": {
+    "model": "claude-3-opus-20240229",
+    "temperature": 0.1,
+    "max_tokens": 2000
+  },
+  "retrieval": {
+    "top_k": 8,
+    "score_threshold": 0.3
+  }
+}

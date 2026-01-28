@@ -106,6 +106,8 @@ def show_user_sidebar():
 # =============================================================================
 
 import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
 from google.cloud import bigquery
 from datetime import datetime, date
 
@@ -252,11 +254,11 @@ def query_roas_table(_client, filters_tuple, selected_dimensions_tuple, add_rt_c
     # Add ROAS metrics with net share method logic
     for day in DAY_COLUMNS:
         net_revenue_expr = build_net_revenue_expression(day, net_share_method)
-        metric_selects.append(f"SUM({net_revenue_expr}) / NULLIF(SUM({cost_expr}), 0) * 100 as d{day}_roas")
+        metric_selects.append(f"SUM({net_revenue_expr}) / NULLIF(SUM({cost_expr}), 0) as d{day}_roas")
         metric_selects.append(f"SUM({net_revenue_expr}) as d{day}_total_net_revenue")
     
     # LTV metrics (use actual net revenue for LTV)
-    metric_selects.append(f"SUM(COALESCE(ltv_total_net_revenue, 0)) / NULLIF(SUM({cost_expr}), 0) * 100 as ltv_roas")
+    metric_selects.append(f"SUM(COALESCE(ltv_total_net_revenue, 0)) / NULLIF(SUM({cost_expr}), 0) as ltv_roas")
     metric_selects.append("SUM(COALESCE(ltv_total_net_revenue, 0)) as ltv_total_net_revenue")
     
     metrics_str = ", ".join(metric_selects)
@@ -494,6 +496,237 @@ def filters_to_tuple(filters):
             items.append((k, v))
     return tuple(items)
 
+# =============================================================================
+# TIME-BASED CHARTS QUERY FUNCTIONS
+# =============================================================================
+
+TIME_RESOLUTION_MAP = {
+    'daily': 'install_date',
+    'weekly': 'week',
+    'monthly': 'month'
+}
+
+@st.cache_data(ttl=60)
+def query_roas_time_series(_client, filters_tuple, time_resolution, add_rt_cost, net_share_method, selected_days):
+    """Query ROAS data for time series charts"""
+    filters = dict(filters_tuple)
+    where_clause = build_where_clause(filters)
+    cost_expr = build_cost_expression(add_rt_cost)
+    
+    time_col = TIME_RESOLUTION_MAP.get(time_resolution, 'install_date')
+    
+    # Build metric selects for selected days
+    metric_selects = [
+        f"SUM({cost_expr}) as cost",
+        "MIN(DATE_DIFF(CURRENT_DATE(), install_date, DAY)) as diff_from_today"
+    ]
+    for day in selected_days:
+        if day == 'ltv':
+            metric_selects.append(f"SUM(COALESCE(ltv_total_net_revenue, 0)) / NULLIF(SUM({cost_expr}), 0) as ltv_roas")
+        else:
+            net_revenue_expr = build_net_revenue_expression(day, net_share_method)
+            metric_selects.append(f"SUM({net_revenue_expr}) / NULLIF(SUM({cost_expr}), 0) as d{day}_roas")
+    
+    metrics_str = ", ".join(metric_selects)
+    
+    query = f"""
+    SELECT 
+        {time_col} as time_period,
+        {metrics_str}
+    FROM `{TABLE_FULL}`
+    WHERE {where_clause}
+    GROUP BY {time_col}
+    ORDER BY {time_col}
+    """
+    
+    return _client.query(query).to_dataframe()
+
+@st.cache_data(ttl=60)
+def query_ftd_time_series(_client, filters_tuple, time_resolution, add_rt_cost, selected_days):
+    """Query FTD data for time series charts"""
+    filters = dict(filters_tuple)
+    where_clause = build_where_clause(filters)
+    cost_expr = build_cost_expression(add_rt_cost)
+    
+    time_col = TIME_RESOLUTION_MAP.get(time_resolution, 'install_date')
+    
+    # Build metric selects for selected days
+    metric_selects = [
+        "SUM(installs) as installs",
+        "MIN(DATE_DIFF(CURRENT_DATE(), install_date, DAY)) as diff_from_today"
+    ]
+    for day in selected_days:
+        if day == 'ltv':
+            metric_selects.append("SUM(ltv_ftds) / NULLIF(SUM(installs), 0) * 100 as ltv_ftd_pct")
+        else:
+            metric_selects.append(f"SUM(d{day}_ftds) / NULLIF(SUM(installs), 0) * 100 as d{day}_ftd_pct")
+    
+    metrics_str = ", ".join(metric_selects)
+    
+    query = f"""
+    SELECT 
+        {time_col} as time_period,
+        {metrics_str}
+    FROM `{TABLE_FULL}`
+    WHERE {where_clause}
+    GROUP BY {time_col}
+    ORDER BY {time_col}
+    """
+    
+    return _client.query(query).to_dataframe()
+
+@st.cache_data(ttl=60)
+def query_retention_time_series(_client, filters_tuple, time_resolution, add_rt_cost, selected_days):
+    """Query Retention data for time series charts"""
+    filters = dict(filters_tuple)
+    where_clause = build_where_clause(filters)
+    
+    time_col = TIME_RESOLUTION_MAP.get(time_resolution, 'install_date')
+    
+    # Build metric selects for selected days
+    metric_selects = [
+        "SUM(installs) as installs",
+        "MIN(DATE_DIFF(CURRENT_DATE(), install_date, DAY)) as diff_from_today"
+    ]
+    for day in selected_days:
+        metric_selects.append(f"SUM(d{day}_retention) / NULLIF(SUM(installs), 0) * 100 as d{day}_ret_pct")
+    
+    metrics_str = ", ".join(metric_selects)
+    
+    query = f"""
+    SELECT 
+        {time_col} as time_period,
+        {metrics_str}
+    FROM `{TABLE_FULL}`
+    WHERE {where_clause}
+    GROUP BY {time_col}
+    ORDER BY {time_col}
+    """
+    
+    return _client.query(query).to_dataframe()
+
+@st.cache_data(ttl=60)
+def query_payer_retention_time_series(_client, filters_tuple, time_resolution, add_rt_cost, selected_days):
+    """Query Payer Retention data for time series charts"""
+    filters = dict(filters_tuple)
+    where_clause = build_where_clause(filters)
+    
+    time_col = TIME_RESOLUTION_MAP.get(time_resolution, 'install_date')
+    
+    # Build metric selects for selected days
+    metric_selects = [
+        "SUM(ltv_ftds) as payers",
+        "MIN(DATE_DIFF(CURRENT_DATE(), install_date, DAY)) as diff_from_today"
+    ]
+    for day in selected_days:
+        metric_selects.append(f"SUM(d{day}_payers_retention) / NULLIF(SUM(ltv_ftds), 0) * 100 as d{day}_payers_ret_pct")
+    
+    metrics_str = ", ".join(metric_selects)
+    
+    query = f"""
+    SELECT 
+        {time_col} as time_period,
+        {metrics_str}
+    FROM `{TABLE_FULL}`
+    WHERE {where_clause}
+    GROUP BY {time_col}
+    ORDER BY {time_col}
+    """
+    
+    return _client.query(query).to_dataframe()
+
+def create_time_series_chart(df, metric_columns, title, y_axis_label, is_percentage=False, selected_days=None):
+    """Create a line chart for time series data, filtering out incomplete periods"""
+    if df.empty:
+        return None
+    
+    fig = go.Figure()
+    
+    # Color palette for lines
+    colors = px.colors.qualitative.Set2
+    
+    # Create a mapping of column names to their day numbers for filtering
+    col_to_day = {}
+    if selected_days:
+        for day in selected_days:
+            if day == 'ltv':
+                # LTV columns: ltv_roas, ltv_ftd_pct, etc.
+                col_to_day['ltv_roas'] = None  # LTV is always complete
+                col_to_day['ltv_ftd_pct'] = None
+            else:
+                # Day columns: d7_roas, d7_ftd_pct, d7_ret_pct, d7_payers_ret_pct
+                col_to_day[f'd{day}_roas'] = day
+                col_to_day[f'd{day}_ftd_pct'] = day
+                col_to_day[f'd{day}_ret_pct'] = day
+                col_to_day[f'd{day}_payers_ret_pct'] = day
+    
+    for idx, col in enumerate(metric_columns):
+        if col in df.columns:
+            # Format the legend name
+            legend_name = col.replace('_roas', ' ROAS').replace('_ftd_pct', ' FTD %').replace('_ret_pct', ' Ret %').replace('_payers_ret_pct', ' Payer Ret %')
+            legend_name = legend_name.replace('d', 'D').replace('ltv', 'LTV')
+            
+            # Filter out incomplete periods
+            y_values = df[col].copy()
+            if 'diff_from_today' in df.columns and col in col_to_day:
+                day_num = col_to_day[col]
+                if day_num is not None:  # Not LTV
+                    # Set to NaN where period is not fully baked
+                    mask = df['diff_from_today'] < day_num
+                    y_values = y_values.where(~mask, None)
+            
+            fig.add_trace(go.Scatter(
+                x=df['time_period'],
+                y=y_values,
+                mode='lines+markers',
+                name=legend_name,
+                line=dict(color=colors[idx % len(colors)], width=2),
+                marker=dict(size=6),
+                connectgaps=False  # Don't connect lines across gaps
+            ))
+    
+    # Format y-axis for percentages
+    y_format = '.2%' if is_percentage else '.2f'
+    
+    fig.update_layout(
+        title=dict(text=title, font=dict(size=18, color='#333')),
+        xaxis_title='Time Period',
+        yaxis_title=y_axis_label,
+        hovermode='x unified',
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="right",
+            x=1
+        ),
+        plot_bgcolor='white',
+        paper_bgcolor='white',
+        font=dict(family="Arial, sans-serif", size=12, color="#333"),
+        margin=dict(l=60, r=40, t=80, b=60)
+    )
+    
+    fig.update_xaxes(
+        showgrid=True,
+        gridwidth=1,
+        gridcolor='#f0f0f0',
+        showline=True,
+        linewidth=1,
+        linecolor='#ddd'
+    )
+    
+    fig.update_yaxes(
+        showgrid=True,
+        gridwidth=1,
+        gridcolor='#f0f0f0',
+        showline=True,
+        linewidth=1,
+        linecolor='#ddd',
+        tickformat=y_format if is_percentage else None
+    )
+    
+    return fig
+
 def add_summary_row(df, table_type, selected_dimensions):
     """Add a summary row that applies the same formulas to all rows"""
     if df.empty:
@@ -501,10 +734,10 @@ def add_summary_row(df, table_type, selected_dimensions):
     
     summary_row = {}
     
-    # For dimension columns, use "Total"
+    # For dimension columns, use "Fully Baked Total"
     for dim in selected_dimensions:
         if dim in df.columns:
-            summary_row[dim] = "Total"
+            summary_row[dim] = "Fully Baked Total"
     
     # Common metrics - sum them
     if 'cost' in df.columns:
@@ -535,90 +768,72 @@ def add_summary_row(df, table_type, selected_dimensions):
             distinct_dates = len(df)
         summary_row['avg_daily_installs'] = total_installs / distinct_dates if distinct_dates > 0 else 0
     
-    # Get diff_from_today for filtering (only include fully completed periods)
-    # Work with a copy to avoid modifying the original dataframe
-    df_work = df.copy()
+    # Prepare diff_from_today for filtering (only fully completed periods - black cells)
     diff_col = None
-    if 'diff_from_today' in df_work.columns:
-        # Convert to numeric if possible
+    if 'diff_from_today' in df.columns:
         try:
-            df_work['_diff_numeric'] = pd.to_numeric(df_work['diff_from_today'], errors='coerce')
-            diff_col = '_diff_numeric'
+            df_numeric_diff = pd.to_numeric(df['diff_from_today'], errors='coerce')
+            diff_col = df_numeric_diff
         except:
             pass
     
-    # Table-specific metrics
+    # Helper function to get rows where period is complete (diff_from_today >= day)
+    def get_completed_rows(day_num):
+        if diff_col is not None:
+            return df[diff_col >= day_num]
+        return df  # Fallback to all rows if diff_from_today not available
+    
+    # Table-specific metrics - only include fully completed periods (black cells)
     if table_type == 'roas':
-        # For cost, use all rows (not period-specific)
-        total_cost = df_work['cost'].sum()
         for day in DAY_COLUMNS:
-            if f'd{day}_total_net_revenue' in df_work.columns:
-                # Only include rows where diff_from_today >= day (fully completed periods)
-                if diff_col:
-                    completed_df = df_work[df_work[diff_col] >= day]
-                else:
-                    completed_df = df_work  # Fallback to all rows if diff_from_today not available
-                
+            if f'd{day}_total_net_revenue' in df.columns:
+                # Only include rows where diff_from_today >= day (fully completed/black cells)
+                completed_df = get_completed_rows(day)
                 total_revenue = completed_df[f'd{day}_total_net_revenue'].sum()
                 completed_cost = completed_df['cost'].sum()
                 summary_row[f'd{day}_roas'] = total_revenue / completed_cost if completed_cost > 0 else 0
                 summary_row[f'd{day}_total_net_revenue'] = total_revenue
-        # LTV metrics - always include all rows (LTV is always black)
-        if 'ltv_total_net_revenue' in df_work.columns:
-            total_ltv_revenue = df_work['ltv_total_net_revenue'].sum()
+        # LTV metrics - always include all rows (LTV is always black/complete)
+        if 'ltv_total_net_revenue' in df.columns:
+            total_cost = df['cost'].sum()
+            total_ltv_revenue = df['ltv_total_net_revenue'].sum()
             summary_row['ltv_roas'] = total_ltv_revenue / total_cost if total_cost > 0 else 0
             summary_row['ltv_total_net_revenue'] = total_ltv_revenue
     
     elif table_type == 'ftds':
-        # For installs, use all rows (not period-specific)
-        total_installs = df_work['installs'].sum()
         for day in DAY_COLUMNS:
-            if f'd{day}_ftds' in df_work.columns:
-                # Only include rows where diff_from_today >= day (fully completed periods)
-                if diff_col:
-                    completed_df = df_work[df_work[diff_col] >= day]
-                else:
-                    completed_df = df_work  # Fallback to all rows if diff_from_today not available
-                
+            if f'd{day}_ftds' in df.columns:
+                # Only include rows where diff_from_today >= day (fully completed/black cells)
+                completed_df = get_completed_rows(day)
                 total_ftds = completed_df[f'd{day}_ftds'].sum()
                 completed_installs = completed_df['installs'].sum()
                 summary_row[f'd{day}_ftd_pct'] = (total_ftds / completed_installs * 100) if completed_installs > 0 else 0
                 summary_row[f'd{day}_ftds'] = total_ftds
-        # LTV metrics - always include all rows (LTV is always black)
-        if 'ltv_ftds' in df_work.columns:
-            total_ltv_ftds = df_work['ltv_ftds'].sum()
+        # LTV metrics - always include all rows (LTV is always black/complete)
+        if 'ltv_ftds' in df.columns:
+            total_installs = df['installs'].sum()
+            total_ltv_ftds = df['ltv_ftds'].sum()
             summary_row['ltv_ftd_pct'] = (total_ltv_ftds / total_installs * 100) if total_installs > 0 else 0
             summary_row['ltv_ftds'] = total_ltv_ftds
     
     elif table_type == 'retention':
-        # For installs, use all rows (not period-specific)
-        total_installs = df_work['installs'].sum()
         for day in DAY_COLUMNS:
-            if f'd{day}_ret' in df_work.columns:
-                # Only include rows where diff_from_today >= day (fully completed periods)
-                if diff_col:
-                    completed_df = df_work[df_work[diff_col] >= day]
-                else:
-                    completed_df = df_work  # Fallback to all rows if diff_from_today not available
-                
+            if f'd{day}_ret' in df.columns:
+                # Only include rows where diff_from_today >= day (fully completed/black cells)
+                completed_df = get_completed_rows(day)
                 total_ret = completed_df[f'd{day}_ret'].sum()
                 completed_installs = completed_df['installs'].sum()
                 summary_row[f'd{day}_ret_pct'] = (total_ret / completed_installs * 100) if completed_installs > 0 else 0
                 summary_row[f'd{day}_ret'] = total_ret
     
     elif table_type == 'payer_retention':
-        # Payers - always include all rows (not period-specific)
-        if 'payers' in df_work.columns:
-            summary_row['payers'] = df_work['payers'].sum()
-        total_payers = df_work['payers'].sum() if 'payers' in df_work.columns else 0
+        # Payers total - always include all rows
+        if 'payers' in df.columns:
+            summary_row['payers'] = df['payers'].sum()
         for day in DAY_COLUMNS:
-            if f'd{day}_payers_retention' in df_work.columns:
-                # Only include rows where diff_from_today >= day (fully completed periods)
-                if diff_col:
-                    completed_df = df_work[df_work[diff_col] >= day]
-                else:
-                    completed_df = df_work  # Fallback to all rows if diff_from_today not available
-                
+            if f'd{day}_payers_retention' in df.columns:
+                # Only include rows where diff_from_today >= day (fully completed/black cells)
+                completed_df = get_completed_rows(day)
                 total_payers_ret = completed_df[f'd{day}_payers_retention'].sum()
                 completed_payers = completed_df['payers'].sum() if 'payers' in completed_df.columns else 0
                 summary_row[f'd{day}_payers_ret_pct'] = (total_payers_ret / completed_payers * 100) if completed_payers > 0 else 0
@@ -626,13 +841,9 @@ def add_summary_row(df, table_type, selected_dimensions):
     
     elif table_type == 'cpa':
         for day in DAY_COLUMNS:
-            if f'd{day}_ftds' in df_work.columns:
-                # Only include rows where diff_from_today >= day (fully completed periods)
-                if diff_col:
-                    completed_df = df_work[df_work[diff_col] >= day]
-                else:
-                    completed_df = df_work  # Fallback to all rows if diff_from_today not available
-                
+            if f'd{day}_ftds' in df.columns:
+                # Only include rows where diff_from_today >= day (fully completed/black cells)
+                completed_df = get_completed_rows(day)
                 total_ftds = completed_df[f'd{day}_ftds'].sum()
                 completed_cost = completed_df['cost'].sum()
                 summary_row[f'd{day}_cpa'] = completed_cost / total_ftds if total_ftds > 0 else 0
@@ -1066,7 +1277,7 @@ def main():
         st.session_state.run_clicked = True  # Mark that Run has been clicked
         st.rerun()
     
-    # Only show tables if Run button has been clicked
+    # Only show content if Run button has been clicked
     if not st.session_state.get('run_clicked', False):
         st.info("👆 Click 'Run Dashboard' in the sidebar to load data.")
         return
@@ -1077,231 +1288,437 @@ def main():
     net_share_method = st.session_state.run_net_share_method  # Use the stored value from Run button
     selected_dimensions = st.session_state.selected_dimensions
     
-    # Table options
-    table_options = {
-        'roas': 'ROAS',
-        'ftds': 'FTDs',
-        'retention': 'Retention',
-        'payer_retention': 'Payer Retention',
-        'cpa': 'CPA'
-    }
-    
     # Convert to tuples for caching
     filters_tuple = filters_to_tuple(filters)
     selected_dimensions_tuple = tuple(selected_dimensions)
     
-    # Main content area - Display all tables
-    for table_key, table_name in table_options.items():
-        try:
-            st.header(f"📊 {table_name} Table")
-            
-            with st.spinner(f"Loading {table_name} data..."):
-                if table_key == 'roas':
-                    df = query_roas_table(client, filters_tuple, selected_dimensions_tuple, add_rt_cost, net_share_method)
-                elif table_key == 'ftds':
-                    df = query_ftds_table(client, filters_tuple, selected_dimensions_tuple, add_rt_cost)
-                elif table_key == 'retention':
-                    df = query_retention_table(client, filters_tuple, selected_dimensions_tuple, add_rt_cost)
-                elif table_key == 'payer_retention':
-                    df = query_payer_retention_table(client, filters_tuple, selected_dimensions_tuple, add_rt_cost)
-                elif table_key == 'cpa':
-                    df = query_cpa_table(client, filters_tuple, selected_dimensions_tuple, add_rt_cost)
-                else:
-                    df = pd.DataFrame()
-            
-            if df.empty:
-                st.info("No data found for the selected filters.")
-            else:
-                # Add summary row to the dataframe
-                df_with_summary = add_summary_row(df.copy(), table_key, selected_dimensions)
-                
-                # Reorder columns
-                df_reordered = reorder_columns(df_with_summary, table_key, selected_dimensions)
-                
-                
-                # Apply conditional formatting BEFORE formatting (need numeric diff_from_today)
-                # Create a copy for styling that keeps numeric values
-                df_for_styling = df_reordered.copy()
-                
-                # Format dataframe for display
-                display_df = format_dataframe(df_reordered, table_key)
-                
-                # Apply conditional formatting using pandas Styler
-                # We need to apply styles to the formatted dataframe but use diff_from_today from original
-                # So we'll apply styles directly to display_df but reference the numeric diff_from_today
-                if 'diff_from_today' in df_for_styling.columns:
-                    # Temporarily add numeric diff_from_today to display_df for styling
-                    display_df['_diff_from_today_numeric'] = df_for_styling['diff_from_today'].values
-                    styled_df = style_period_cells(display_df, table_key)
-                    # Remove the temporary column
-                    display_df = display_df.drop(columns=['_diff_from_today_numeric'], errors='ignore')
-                else:
-                    styled_df = display_df.style
-                
-                # Apply bold styling to summary row (last row) - skip conditional formatting for it
-                def style_summary_row(row):
-                    styles = []
-                    for col in display_df.columns:
-                        if row.name == len(display_df) - 1:  # Last row (summary)
-                            styles.append('font-weight: bold; background-color: #f0f2f6; color: #000000')
-                        else:
-                            styles.append('')
-                    return pd.Series(styles, index=display_df.columns)
-                
-                styled_df = styled_df.apply(style_summary_row, axis=1)
-                
-                # Set fixed table height for scrolling (show ~10 rows visible, but allow scrolling through all)
-                # Each row ~35px, header ~40px
-                # Show approximately 10 data rows in viewport
-                table_height = 40 + (10 * 35)  # header + ~10 visible rows
-                
-                # Identify frozen columns
-                frozen_cols = []
-                for dim in selected_dimensions:
-                    if dim in display_df.columns:
-                        frozen_cols.append(dim)
-                frozen_cols.extend(['cost', 'installs', 'cpi', 'avg_daily_cost', 'avg_daily_installs'])
-                frozen_cols = [col for col in frozen_cols if col in display_df.columns]
-                
-                # Create unique identifier for this table
-                table_unique_id = f"table_{table_key}"
-                
-                # Wrap dataframe in a div with unique ID for CSS targeting
-                st.markdown(f'<div id="{table_unique_id}">', unsafe_allow_html=True)
-                
-                # Generate CSS for each frozen column with proper left positioning
-                frozen_col_css = ""
-                left_pos = 0
-                for idx, col in enumerate(frozen_cols, 1):
-                    # Estimate column width (approximate)
-                    col_width = 120 if col in ['cost', 'installs', 'avg_daily_cost', 'avg_daily_installs'] else 100
-                    frozen_col_css += f"""
-                #{table_unique_id} div[data-testid="stDataFrame"] table thead th:nth-child({idx}) {{
-                    position: sticky !important;
-                    left: {left_pos}px !important;
-                    z-index: 25 !important;
-                    background-color: white !important;
-                }}
-                #{table_unique_id} div[data-testid="stDataFrame"] table tbody td:nth-child({idx}) {{
-                    position: sticky !important;
-                    left: {left_pos}px !important;
-                    z-index: 10 !important;
-                    background-color: white !important;
-                }}
-                """
-                    left_pos += col_width
-                
-                # Add shadow to the last frozen column
-                frozen_col_css += f"""
-                #{table_unique_id} div[data-testid="stDataFrame"] table thead th:nth-child({len(frozen_cols)}),
-                #{table_unique_id} div[data-testid="stDataFrame"] table tbody td:nth-child({len(frozen_cols)}) {{
-                    box-shadow: 2px 0px 5px rgba(0,0,0,0.1) !important;
-                }}
-                """
-                
-                # CSS for frozen columns and hide empty rows
-                st.markdown(f"""
-                <style>
-                /* Target this specific table container */
-                #{table_unique_id} div[data-testid="stDataFrame"] {{
-                    position: relative !important;
-                }}
-                /* Find the scrollable container - Streamlit wraps tables in nested divs */
-                #{table_unique_id} div[data-testid="stDataFrame"] > div:first-child {{
-                    max-height: {table_height}px !important;
-                    overflow-y: auto !important;
-                    overflow-x: auto !important;
-                    position: relative !important;
-                    display: block !important;
-                }}
-                /* Ensure table structure supports sticky positioning */
-                #{table_unique_id} div[data-testid="stDataFrame"] table {{
-                    border-collapse: separate !important;
-                    border-spacing: 0 !important;
-                    width: 100% !important;
-                }}
-                /* Hide empty rows - target rows with no text content */
-                #{table_unique_id} div[data-testid="stDataFrame"] table tbody tr:empty {{
-                    display: none !important;
-                }}
-                /* Ensure our conditional formatting CSS has highest priority */
-                #{table_unique_id} div[data-testid="stDataFrame"] table tbody td {{
-                    /* Don't set color here - let JavaScript handle it */
-                }}
-                /* Sticky header - bold and black with gray background (same as summary row) */
-                #{table_unique_id} div[data-testid="stDataFrame"] table thead tr th {{
-                    position: sticky !important;
-                    top: 0 !important;
-                    z-index: 20 !important;
-                    background-color: #f0f2f6 !important;
-                    font-weight: bold !important;
-                    color: #000000 !important;
-                }}
-                /* Style summary row (last row) - make it sticky at bottom and bold */
-                #{table_unique_id} div[data-testid="stDataFrame"] table tbody tr:last-child {{
-                    font-weight: bold !important;
-                    background-color: #f0f2f6 !important;
-                    position: sticky !important;
-                    bottom: 0 !important;
-                    z-index: 15 !important;
-                }}
-                #{table_unique_id} div[data-testid="stDataFrame"] table tbody tr:last-child td {{
-                    background-color: #f0f2f6 !important;
-                    font-weight: bold !important;
-                    color: #000000 !important;
-                }}
-                /* IMPORTANT: CSS rules for conditional formatting - backup to JavaScript */
-                #{table_unique_id} div[data-testid="stDataFrame"] table tbody td[data-cf-color="gray"] {{
-                    color: #999999 !important;
-                    background-color: #ffffff !important;
-                }}
-                #{table_unique_id} div[data-testid="stDataFrame"] table tbody td[data-cf-color="black"] {{
-                    color: #000000 !important;
-                    background-color: transparent !important;
-                }}
-                /* Style indicator columns - will be enhanced by JavaScript */
-                {frozen_col_css}
-                </style>
-                """, unsafe_allow_html=True)
-                
-                # Configure column display
-                column_config = {
-                    col: st.column_config.Column(
-                        col,
-                        help=None
-                    ) for col in display_df.columns
-                }
-                
-                # Display table with dynamic height and styling
-                st.dataframe(
-                    styled_df, 
-                    use_container_width=True, 
-                    height=table_height, 
-                    hide_index=True,
-                    column_config=column_config,
-                    key=f"df_{table_key}"
-                )
-                
-                # Close the wrapper div
-                st.markdown('</div>', unsafe_allow_html=True)
-                
-                # Download button
-                csv = df.to_csv(index=False)
-                st.download_button(
-                    label=f"📥 Download {table_name} CSV",
-                    data=csv,
-                    file_name=f"{table_key}_table_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                    mime="text/csv",
-                    key=f"download_{table_key}"
-                )
-            
-            # Add spacing between tables
-            st.markdown("---")
+    # Create main tabs
+    tab_tables, tab_charts = st.tabs(["📊 Tables", "📈 Time Charts"])
+    
+    # =============================================================================
+    # TABLES TAB
+    # =============================================================================
+    with tab_tables:
+        # Table options
+        table_options = {
+            'roas': 'ROAS',
+            'ftds': 'FTDs',
+            'retention': 'Retention',
+            'payer_retention': 'Payer Retention',
+            'cpa': 'CPA'
+        }
         
-        except Exception as e:
-            st.error(f"Error loading {table_name} data: {e}")
-            st.exception(e)
-            st.markdown("---")
+        # Display all tables
+        for table_key, table_name in table_options.items():
+            try:
+                st.header(f"📊 {table_name} Table")
+                
+                with st.spinner(f"Loading {table_name} data..."):
+                    if table_key == 'roas':
+                        df = query_roas_table(client, filters_tuple, selected_dimensions_tuple, add_rt_cost, net_share_method)
+                    elif table_key == 'ftds':
+                        df = query_ftds_table(client, filters_tuple, selected_dimensions_tuple, add_rt_cost)
+                    elif table_key == 'retention':
+                        df = query_retention_table(client, filters_tuple, selected_dimensions_tuple, add_rt_cost)
+                    elif table_key == 'payer_retention':
+                        df = query_payer_retention_table(client, filters_tuple, selected_dimensions_tuple, add_rt_cost)
+                    elif table_key == 'cpa':
+                        df = query_cpa_table(client, filters_tuple, selected_dimensions_tuple, add_rt_cost)
+                    else:
+                        df = pd.DataFrame()
+                
+                if df.empty:
+                    st.info("No data found for the selected filters.")
+                else:
+                    # Add summary row to the dataframe
+                    df_with_summary = add_summary_row(df.copy(), table_key, selected_dimensions)
+                    
+                    # Reorder columns
+                    df_reordered = reorder_columns(df_with_summary, table_key, selected_dimensions)
+                    
+                    
+                    # Apply conditional formatting BEFORE formatting (need numeric diff_from_today)
+                    # Create a copy for styling that keeps numeric values
+                    df_for_styling = df_reordered.copy()
+                    
+                    # Format dataframe for display
+                    display_df = format_dataframe(df_reordered, table_key)
+                    
+                    # Apply conditional formatting using pandas Styler
+                    # We need to apply styles to the formatted dataframe but use diff_from_today from original
+                    # So we'll apply styles directly to display_df but reference the numeric diff_from_today
+                    if 'diff_from_today' in df_for_styling.columns:
+                        # Temporarily add numeric diff_from_today to display_df for styling
+                        display_df['_diff_from_today_numeric'] = df_for_styling['diff_from_today'].values
+                        styled_df = style_period_cells(display_df, table_key)
+                        # Remove the temporary column
+                        display_df = display_df.drop(columns=['_diff_from_today_numeric'], errors='ignore')
+                    else:
+                        styled_df = display_df.style
+                    
+                    # Apply bold styling to summary row (last row) - skip conditional formatting for it
+                    def style_summary_row(row):
+                        styles = []
+                        for col in display_df.columns:
+                            if row.name == len(display_df) - 1:  # Last row (summary)
+                                styles.append('font-weight: bold; background-color: #f0f2f6; color: #000000')
+                            else:
+                                styles.append('')
+                        return pd.Series(styles, index=display_df.columns)
+                    
+                    styled_df = styled_df.apply(style_summary_row, axis=1)
+                    
+                    # Set fixed table height for scrolling (show ~10 rows visible, but allow scrolling through all)
+                    # Each row ~35px, header ~40px
+                    # Show approximately 10 data rows in viewport
+                    table_height = 40 + (10 * 35)  # header + ~10 visible rows
+                    
+                    # Identify frozen columns
+                    frozen_cols = []
+                    for dim in selected_dimensions:
+                        if dim in display_df.columns:
+                            frozen_cols.append(dim)
+                    frozen_cols.extend(['cost', 'installs', 'cpi', 'avg_daily_cost', 'avg_daily_installs'])
+                    frozen_cols = [col for col in frozen_cols if col in display_df.columns]
+                    
+                    # Create unique identifier for this table
+                    table_unique_id = f"table_{table_key}"
+                    
+                    # Wrap dataframe in a div with unique ID for CSS targeting
+                    st.markdown(f'<div id="{table_unique_id}">', unsafe_allow_html=True)
+                    
+                    # Generate CSS for each frozen column with proper left positioning
+                    frozen_col_css = ""
+                    left_pos = 0
+                    for idx, col in enumerate(frozen_cols, 1):
+                        # Estimate column width (approximate)
+                        col_width = 120 if col in ['cost', 'installs', 'avg_daily_cost', 'avg_daily_installs'] else 100
+                        frozen_col_css += f"""
+                    #{table_unique_id} div[data-testid="stDataFrame"] table thead th:nth-child({idx}) {{
+                        position: sticky !important;
+                        left: {left_pos}px !important;
+                        z-index: 25 !important;
+                        background-color: white !important;
+                    }}
+                    #{table_unique_id} div[data-testid="stDataFrame"] table tbody td:nth-child({idx}) {{
+                        position: sticky !important;
+                        left: {left_pos}px !important;
+                        z-index: 10 !important;
+                        background-color: white !important;
+                    }}
+                    """
+                        left_pos += col_width
+                    
+                    # Add shadow to the last frozen column
+                    frozen_col_css += f"""
+                    #{table_unique_id} div[data-testid="stDataFrame"] table thead th:nth-child({len(frozen_cols)}),
+                    #{table_unique_id} div[data-testid="stDataFrame"] table tbody td:nth-child({len(frozen_cols)}) {{
+                        box-shadow: 2px 0px 5px rgba(0,0,0,0.1) !important;
+                    }}
+                    """
+                    
+                    # CSS for frozen columns and hide empty rows
+                    st.markdown(f"""
+                    <style>
+                    /* Target this specific table container */
+                    #{table_unique_id} div[data-testid="stDataFrame"] {{
+                        position: relative !important;
+                    }}
+                    /* Find the scrollable container - Streamlit wraps tables in nested divs */
+                    #{table_unique_id} div[data-testid="stDataFrame"] > div:first-child {{
+                        max-height: {table_height}px !important;
+                        overflow-y: auto !important;
+                        overflow-x: auto !important;
+                        position: relative !important;
+                        display: block !important;
+                    }}
+                    /* Ensure table structure supports sticky positioning */
+                    #{table_unique_id} div[data-testid="stDataFrame"] table {{
+                        border-collapse: separate !important;
+                        border-spacing: 0 !important;
+                        width: 100% !important;
+                    }}
+                    /* Hide empty rows - target rows with no text content */
+                    #{table_unique_id} div[data-testid="stDataFrame"] table tbody tr:empty {{
+                        display: none !important;
+                    }}
+                    /* Ensure our conditional formatting CSS has highest priority */
+                    #{table_unique_id} div[data-testid="stDataFrame"] table tbody td {{
+                        /* Don't set color here - let JavaScript handle it */
+                    }}
+                    /* Sticky header - bold and black with gray background (same as summary row) */
+                    #{table_unique_id} div[data-testid="stDataFrame"] table thead tr th {{
+                        position: sticky !important;
+                        top: 0 !important;
+                        z-index: 20 !important;
+                        background-color: #f0f2f6 !important;
+                        font-weight: bold !important;
+                        color: #000000 !important;
+                    }}
+                    /* Style summary row (last row) - make it sticky at bottom and bold */
+                    #{table_unique_id} div[data-testid="stDataFrame"] table tbody tr:last-child {{
+                        font-weight: bold !important;
+                        background-color: #f0f2f6 !important;
+                        position: sticky !important;
+                        bottom: 0 !important;
+                        z-index: 15 !important;
+                    }}
+                        background-color: #f0f2f6 !important;
+                        font-weight: bold !important;
+                        color: #000000 !important;
+                    }}
+                    /* IMPORTANT: CSS rules for conditional formatting - backup to JavaScript */
+                    #{table_unique_id} div[data-testid="stDataFrame"] table tbody td[data-cf-color="gray"] {{
+                        color: #999999 !important;
+                        background-color: #ffffff !important;
+                    }}
+                    #{table_unique_id} div[data-testid="stDataFrame"] table tbody td[data-cf-color="black"] {{
+                        color: #000000 !important;
+                        background-color: transparent !important;
+                    }}
+                    /* Style indicator columns - will be enhanced by JavaScript */
+                    {frozen_col_css}
+                    </style>
+                    """, unsafe_allow_html=True)
+                    
+                    # Configure column display
+                    column_config = {
+                        col: st.column_config.Column(
+                            col,
+                            help=None
+                        ) for col in display_df.columns
+                    }
+                    
+                    # Display table with dynamic height and styling
+                    st.dataframe(
+                        styled_df, 
+                        use_container_width=True, 
+                        height=table_height, 
+                        hide_index=True,
+                        column_config=column_config,
+                        key=f"df_{table_key}"
+                    )
+                    
+                    # Close the wrapper div
+                    st.markdown('</div>', unsafe_allow_html=True)
+                    
+                    # Download button
+                    csv = df.to_csv(index=False)
+                    st.download_button(
+                        label=f"📥 Download {table_name} CSV",
+                        data=csv,
+                        file_name=f"{table_key}_table_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                        mime="text/csv",
+                        key=f"download_{table_key}"
+                    )
+                
+                # Add spacing between tables
+                st.markdown("---")
+            
+            except Exception as e:
+                st.error(f"Error loading {table_name} data: {e}")
+                st.exception(e)
+                st.markdown("---")
+    
+    # =============================================================================
+    # CHARTS TAB
+    # =============================================================================
+    with tab_charts:
+        st.header("📈 Time-Based Charts")
+        
+        # Chart controls
+        col1, col2 = st.columns([1, 3])
+        
+        with col1:
+            # Time resolution selector
+            time_resolution = st.radio(
+                "Time Resolution",
+                options=["daily", "weekly", "monthly"],
+                index=1,  # Default to weekly
+                key="chart_time_resolution",
+                horizontal=True
+            )
+        
+        # Available day options for multi-select
+        day_options = ['ltv'] + [str(d) for d in DAY_COLUMNS]
+        day_labels = {str(d): f"D{d}" for d in DAY_COLUMNS}
+        day_labels['ltv'] = 'LTV'
+        
+        st.markdown("---")
+        
+        # ROAS Chart
+        st.subheader("📊 ROAS Over Time")
+        selected_roas_days = st.multiselect(
+            "Select ROAS metrics to display",
+            options=day_options,
+            default=['1', '7', '30'],
+            format_func=lambda x: day_labels.get(x, x),
+            key="roas_days_select"
+        )
+        
+        if selected_roas_days:
+            try:
+                # Convert string days back to integers (except 'ltv')
+                selected_days_parsed = []
+                for d in selected_roas_days:
+                    if d == 'ltv':
+                        selected_days_parsed.append('ltv')
+                    else:
+                        selected_days_parsed.append(int(d))
+                
+                with st.spinner("Loading ROAS chart data..."):
+                    roas_df = query_roas_time_series(
+                        client, filters_tuple, time_resolution, 
+                        add_rt_cost, net_share_method, tuple(selected_days_parsed)
+                    )
+                
+                if not roas_df.empty:
+                    # Build metric column names
+                    metric_cols = []
+                    for d in selected_days_parsed:
+                        if d == 'ltv':
+                            metric_cols.append('ltv_roas')
+                        else:
+                            metric_cols.append(f'd{d}_roas')
+                    
+                    fig = create_time_series_chart(
+                        roas_df, metric_cols, 
+                        "ROAS Over Time", "ROAS", 
+                        is_percentage=True,
+                        selected_days=selected_days_parsed
+                    )
+                    if fig:
+                        st.plotly_chart(fig, use_container_width=True)
+                else:
+                    st.info("No ROAS data found for the selected filters.")
+            except Exception as e:
+                st.error(f"Error loading ROAS chart: {e}")
+        
+        st.markdown("---")
+        
+        # FTD Chart
+        st.subheader("👥 FTD % Over Time")
+        selected_ftd_days = st.multiselect(
+            "Select FTD metrics to display",
+            options=day_options,
+            default=['1', '7', '30'],
+            format_func=lambda x: day_labels.get(x, x),
+            key="ftd_days_select"
+        )
+        
+        if selected_ftd_days:
+            try:
+                selected_days_parsed = []
+                for d in selected_ftd_days:
+                    if d == 'ltv':
+                        selected_days_parsed.append('ltv')
+                    else:
+                        selected_days_parsed.append(int(d))
+                
+                with st.spinner("Loading FTD chart data..."):
+                    ftd_df = query_ftd_time_series(
+                        client, filters_tuple, time_resolution, 
+                        add_rt_cost, tuple(selected_days_parsed)
+                    )
+                
+                if not ftd_df.empty:
+                    metric_cols = []
+                    for d in selected_days_parsed:
+                        if d == 'ltv':
+                            metric_cols.append('ltv_ftd_pct')
+                        else:
+                            metric_cols.append(f'd{d}_ftd_pct')
+                    
+                    fig = create_time_series_chart(
+                        ftd_df, metric_cols, 
+                        "FTD % Over Time", "FTD %", 
+                        is_percentage=False,
+                        selected_days=selected_days_parsed
+                    )
+                    if fig:
+                        st.plotly_chart(fig, use_container_width=True)
+                else:
+                    st.info("No FTD data found for the selected filters.")
+            except Exception as e:
+                st.error(f"Error loading FTD chart: {e}")
+        
+        st.markdown("---")
+        
+        # Retention Chart
+        st.subheader("🔄 Retention % Over Time")
+        # For retention, no LTV - only day columns
+        retention_day_options = [str(d) for d in DAY_COLUMNS]
+        selected_ret_days = st.multiselect(
+            "Select Retention metrics to display",
+            options=retention_day_options,
+            default=['1', '7', '30'],
+            format_func=lambda x: f"D{x}",
+            key="ret_days_select"
+        )
+        
+        if selected_ret_days:
+            try:
+                selected_days_parsed = [int(d) for d in selected_ret_days]
+                
+                with st.spinner("Loading Retention chart data..."):
+                    ret_df = query_retention_time_series(
+                        client, filters_tuple, time_resolution, 
+                        add_rt_cost, tuple(selected_days_parsed)
+                    )
+                
+                if not ret_df.empty:
+                    metric_cols = [f'd{d}_ret_pct' for d in selected_days_parsed]
+                    
+                    fig = create_time_series_chart(
+                        ret_df, metric_cols, 
+                        "Retention % Over Time", "Retention %", 
+                        is_percentage=False,
+                        selected_days=selected_days_parsed
+                    )
+                    if fig:
+                        st.plotly_chart(fig, use_container_width=True)
+                else:
+                    st.info("No Retention data found for the selected filters.")
+            except Exception as e:
+                st.error(f"Error loading Retention chart: {e}")
+        
+        st.markdown("---")
+        
+        # Payer Retention Chart
+        st.subheader("💰 Payer Retention % Over Time")
+        selected_payer_ret_days = st.multiselect(
+            "Select Payer Retention metrics to display",
+            options=retention_day_options,
+            default=['1', '7', '30'],
+            format_func=lambda x: f"D{x}",
+            key="payer_ret_days_select"
+        )
+        
+        if selected_payer_ret_days:
+            try:
+                selected_days_parsed = [int(d) for d in selected_payer_ret_days]
+                
+                with st.spinner("Loading Payer Retention chart data..."):
+                    payer_ret_df = query_payer_retention_time_series(
+                        client, filters_tuple, time_resolution, 
+                        add_rt_cost, tuple(selected_days_parsed)
+                    )
+                
+                if not payer_ret_df.empty:
+                    metric_cols = [f'd{d}_payers_ret_pct' for d in selected_days_parsed]
+                    
+                    fig = create_time_series_chart(
+                        payer_ret_df, metric_cols, 
+                        "Payer Retention % Over Time", "Payer Retention %", 
+                        is_percentage=False,
+                        selected_days=selected_days_parsed
+                    )
+                    if fig:
+                        st.plotly_chart(fig, use_container_width=True)
+                else:
+                    st.info("No Payer Retention data found for the selected filters.")
+            except Exception as e:
+                st.error(f"Error loading Payer Retention chart: {e}")
 
 if __name__ == "__main__":
     main()

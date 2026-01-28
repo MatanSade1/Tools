@@ -1,0 +1,12 @@
+# Ignore local secrets - Cloud Run uses environment variables
+.streamlit/secrets.toml
+
+# Ignore development files
+*.pyc
+__pycache__
+.git
+.gitignore
+*.md
+*.bak
+.DS_Store
+
