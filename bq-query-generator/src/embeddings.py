@@ -51,6 +51,50 @@ class EmbeddingGenerator:
     
     def generate_embeddings_batch(self, texts: List[str]) -> List[List[float]]:
         """
+        Generate embeddings for multiple texts in a single API call.
+        
+        OpenAI allows up to 2048 inputs per request. This method automatically
+        batches if you provide more than 2048 texts.
+        
+        Args:
+            texts: List of input texts to embed
+            
+        Returns:
+            List of embedding vectors (same order as input)
+        """
+        if not texts:
+            return []
+        
+        # Filter out empty texts and track indices
+        valid_texts = []
+        valid_indices = []
+        for i, text in enumerate(texts):
+            if text and text.strip():
+                valid_texts.append(text)
+                valid_indices.append(i)
+        
+        if not valid_texts:
+            raise ValueError("All texts are empty")
+        
+        embeddings = []
+        batch_size = 2048  # OpenAI's max batch size
+        
+        for i in range(0, len(valid_texts), batch_size):
+            batch = valid_texts[i:i + batch_size]
+            
+            response = self.client.embeddings.create(
+                input=batch,
+                model=self.model
+            )
+            
+            # Extract embeddings in order
+            batch_embeddings = [item.embedding for item in response.data]
+            embeddings.extend(batch_embeddings)
+        
+        return embeddings
+    
+    def generate_embeddings_batch(self, texts: List[str]) -> List[List[float]]:
+        """
         Generate embeddings for multiple texts in a batch.
         
         Args:

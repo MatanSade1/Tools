@@ -694,6 +694,22 @@ def step_1_calculate_potential_fraudsters(client: bigquery.Client, run_id: str) 
         STRING_AGG(DISTINCT payment_platform, ', ') AS affected_platforms
       FROM duplicate_transactions_agg
       GROUP BY distinct_id
+    ),
+
+    -- Pattern 15: Suspicious $0.01 Purchases
+    -- Users making multiple purchases at exactly $0.01 price
+    fraud_pattern_15 AS (
+      SELECT
+        distinct_id,
+        COUNT(*) AS penny_purchase_count,
+        MAX(TIMESTAMP_MILLIS(CAST(res_timestamp AS INT64))) AS last_penny_purchase_time
+      FROM `yotam-395120.peerplay.vmp_master_event_normalized`
+      WHERE mp_event_name = 'purchase_successful'
+        AND CAST(price_original AS FLOAT64) = 0.01
+        AND date >= DATE('2025-03-01')
+        AND distinct_id IN (SELECT distinct_id FROM target_users)
+      GROUP BY distinct_id
+      HAVING COUNT(*) >= 2  -- At least 2 purchases at $0.01
     )
 
 
@@ -789,6 +805,11 @@ def step_1_calculate_potential_fraudsters(client: bigquery.Client, run_id: str) 
       p14.earliest_duplicate_time,
       p14.latest_duplicate_time,
 
+      -- Pattern 15 info - Suspicious $0.01 Purchases
+      CASE WHEN p15.distinct_id IS NOT NULL THEN 1 ELSE 0 END AS penny_purchase_flag,
+      p15.penny_purchase_count,
+      p15.last_penny_purchase_time,
+
       -- Total flags for sorting (updated to include all patterns)
       (CASE WHEN p1.distinct_id IS NOT NULL THEN 1 ELSE 0 END) +
       (CASE WHEN p2.distinct_id IS NOT NULL THEN 1 ELSE 0 END) +
@@ -803,7 +824,8 @@ def step_1_calculate_potential_fraudsters(client: bigquery.Client, run_id: str) 
       (CASE WHEN p11.distinct_id IS NOT NULL THEN 1 ELSE 0 END) +
       (CASE WHEN p12.distinct_id IS NOT NULL THEN 1 ELSE 0 END) +
       (CASE WHEN p13.distinct_id IS NOT NULL THEN 1 ELSE 0 END) +
-      (CASE WHEN p14.distinct_id IS NOT NULL THEN 1 ELSE 0 END) AS total_fraud_flags,
+      (CASE WHEN p14.distinct_id IS NOT NULL THEN 1 ELSE 0 END) +
+      (CASE WHEN p15.distinct_id IS NOT NULL THEN 1 ELSE 0 END) AS total_fraud_flags,
 
       -- Add metadata for tracking
       CURRENT_TIMESTAMP() AS analysis_timestamp,
@@ -824,6 +846,7 @@ def step_1_calculate_potential_fraudsters(client: bigquery.Client, run_id: str) 
     LEFT JOIN fraud_pattern_12 p12 ON u.distinct_id = p12.distinct_id
     LEFT JOIN fraud_pattern_13 p13 ON u.distinct_id = p13.distinct_id
     LEFT JOIN fraud_pattern_14 p14 ON u.distinct_id = p14.distinct_id
+    LEFT JOIN fraud_pattern_15 p15 ON u.distinct_id = p15.distinct_id
     WHERE p1.distinct_id IS NOT NULL
        OR p2.distinct_id IS NOT NULL
        OR p3.distinct_id IS NOT NULL
@@ -838,6 +861,7 @@ def step_1_calculate_potential_fraudsters(client: bigquery.Client, run_id: str) 
        OR p12.distinct_id IS NOT NULL
        OR p13.distinct_id IS NOT NULL
        OR p14.distinct_id IS NOT NULL
+       OR p15.distinct_id IS NOT NULL
     )
     """
     
@@ -910,7 +934,8 @@ def step_3_update_fraudsters_table(client: bigquery.Client, run_id: str) -> Dict
       refund_abuse_flag,
       high_tutorial_balance_flag,
       multiple_chapter1_purchases_flag,
-      duplicate_transaction_flag
+      duplicate_transaction_flag,
+      penny_purchase_flag
     )
     WITH last_purchase_dates AS (
       -- Get the last purchase date for each user
@@ -939,16 +964,17 @@ def step_3_update_fraudsters_table(client: bigquery.Client, run_id: str) -> Dict
       refund_abuse_flag,
       high_tutorial_balance_flag,
       multiple_chapter1_purchases_flag,
-      duplicate_transaction_flag
+      duplicate_transaction_flag,
+      penny_purchase_flag
     FROM `yotam-395120.peerplay.potential_fraudsters` pf
     LEFT JOIN `yotam-395120.peerplay.dim_player` dp ON pf.distinct_id = dp.distinct_id
     LEFT JOIN last_purchase_dates lpd ON pf.distinct_id = lpd.distinct_id
     WHERE pf.first_country NOT IN ('UA','IL')
     AND (
-      -- Apple users: installed OR last purchased on/after 2025-08-13: ONLY duplicate_transaction_flag
+      -- Apple users: installed OR last purchased on/after 2025-08-13: ONLY duplicate_transaction_flag or penny_purchase_flag
       (dp.first_platform = 'Apple'
        AND (dp.install_date >= DATE('2025-08-13') OR lpd.last_purchase_date >= DATE('2025-08-13'))
-       AND pf.duplicate_transaction_flag = 1)
+       AND (pf.duplicate_transaction_flag = 1 OR pf.penny_purchase_flag = 1))
 
       -- Apple users: installed AND last purchased before 2025-08-13: Previous logic
       OR (dp.first_platform = 'Apple'
@@ -966,12 +992,13 @@ def step_3_update_fraudsters_table(client: bigquery.Client, run_id: str) -> Dict
             OR refund_abuse_flag=1
             OR multiple_chapter1_purchases_flag=1
             OR duplicate_transaction_flag=1
+            OR penny_purchase_flag=1
           ))
 
-      -- Android users: installed OR last purchased on/after 2025-04-17: ONLY duplicate_transaction_flag
+      -- Android users: installed OR last purchased on/after 2025-04-17: ONLY duplicate_transaction_flag or penny_purchase_flag
       OR (dp.first_platform = 'Android'
           AND (dp.install_date >= DATE('2025-04-17') OR lpd.last_purchase_date >= DATE('2025-04-17'))
-          AND pf.duplicate_transaction_flag = 1)
+          AND (pf.duplicate_transaction_flag = 1 OR pf.penny_purchase_flag = 1))
 
       -- Android users: installed AND last purchased before 2025-04-17: Previous logic
       OR (dp.first_platform = 'Android'
@@ -988,6 +1015,7 @@ def step_3_update_fraudsters_table(client: bigquery.Client, run_id: str) -> Dict
             OR refund_abuse_flag=1
             OR multiple_chapter1_purchases_flag=1
             OR duplicate_transaction_flag=1
+            OR penny_purchase_flag=1
           ))
     );
 
@@ -1009,7 +1037,8 @@ def step_3_update_fraudsters_table(client: bigquery.Client, run_id: str) -> Dict
       refund_abuse_flag,
       high_tutorial_balance_flag,
       multiple_chapter1_purchases_flag,
-      duplicate_transaction_flag
+      duplicate_transaction_flag,
+      penny_purchase_flag
     )
     SELECT
       distinct_id,
@@ -1027,7 +1056,8 @@ def step_3_update_fraudsters_table(client: bigquery.Client, run_id: str) -> Dict
       0 as refund_abuse_flag,
       0 as high_tutorial_balance_flag,
       0 as multiple_chapter1_purchases_flag,
-      0 as duplicate_transaction_flag
+      0 as duplicate_transaction_flag,
+      0 as penny_purchase_flag
     FROM `yotam-395120.peerplay.fraudsters`
     WHERE manual_identification_fraud_purchase_flag=1
       AND distinct_id NOT IN (

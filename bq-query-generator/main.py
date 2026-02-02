@@ -183,5 +183,167 @@ def test():
     click.echo("="*70 + "\n")
 
 
+@cli.command(name='sync-columns')
+@click.option('--table', '-t', help='Full table name to sync (e.g., project.dataset.table)')
+@click.option('--all', '-a', 'sync_all', is_flag=True, help='Sync all tables from query_gen_tables')
+@click.option('--dry-run', is_flag=True, help='Show changes without applying them')
+@click.option('--verbose', '-v', is_flag=True, help='Show detailed sync progress')
+def sync_columns(table: str, sync_all: bool, dry_run: bool, verbose: bool):
+    """
+    Automatically sync table columns from BigQuery schema to query_gen_columns.
+    
+    This command:
+    1. Fetches the actual schema from BigQuery INFORMATION_SCHEMA
+    2. Compares with existing columns in query_gen_columns
+    3. Detects added, updated, and removed columns
+    4. Updates query_gen_columns table
+    5. Incrementally syncs changes to Pinecone
+    
+    Examples:
+        # Sync a specific table
+        python main.py sync-columns --table "yotam-395120.peerplay.events"
+        
+        # Preview changes without applying
+        python main.py sync-columns --table "yotam-395120.peerplay.events" --dry-run
+        
+        # Sync all tables registered in query_gen_tables
+        python main.py sync-columns --all
+    """
+    if not table and not sync_all:
+        click.echo("❌ Error: Must specify either --table or --all", err=True)
+        click.echo("Try: python main.py sync-columns --help")
+        sys.exit(1)
+    
+    try:
+        from src.schema_sync import SchemaSync
+        from src.incremental_sync import IncrementalPineconeSync
+        from src.vector_store import VectorStore
+        from src.embeddings import EmbeddingGenerator
+        from src.bigquery_loader import BigQueryMetadataLoader
+        
+        # Initialize components
+        schema_sync = SchemaSync()
+        
+        # Get tables to sync
+        tables_to_sync = []
+        if sync_all:
+            # Load all tables from query_gen_tables
+            loader = BigQueryMetadataLoader()
+            all_tables = loader.load_tables()
+            tables_to_sync = [t['name'] for t in all_tables]
+            click.echo(f"\n🔄 Syncing {len(tables_to_sync)} tables from query_gen_tables...\n")
+        else:
+            tables_to_sync = [table]
+        
+        # Sync each table
+        total_stats = {'deleted': 0, 'updated': 0, 'inserted': 0, 'tables': 0}
+        
+        for table_name in tables_to_sync:
+            click.echo("="*70)
+            click.echo(f"Syncing: {table_name}")
+            click.echo("="*70)
+            
+            try:
+                # Fetch and compare schema
+                if verbose:
+                    click.echo("\n📊 Fetching schema from BigQuery...")
+                
+                changes, stats = schema_sync.sync_table(table_name, dry_run=dry_run)
+                
+                # Display changes
+                total_changes = len(changes['added']) + len(changes['updated']) + len(changes['removed'])
+                
+                if total_changes == 0:
+                    click.echo("\n✓ Schema is up-to-date. No changes needed.\n")
+                    continue
+                
+                click.echo(f"\n📋 Changes detected: {total_changes} total")
+                
+                if changes['added']:
+                    click.echo(f"\n  ➕ Added: {len(changes['added'])} new columns")
+                    for col in changes['added'][:5]:
+                        click.echo(f"     - {col['name']} ({col['type']})")
+                    if len(changes['added']) > 5:
+                        click.echo(f"     ... and {len(changes['added']) - 5} more")
+                
+                if changes['updated']:
+                    click.echo(f"\n  🔄 Updated: {len(changes['updated'])} columns")
+                    for col in changes['updated'][:5]:
+                        click.echo(f"     - {col['name']}: schema changed")
+                    if len(changes['updated']) > 5:
+                        click.echo(f"     ... and {len(changes['updated']) - 5} more")
+                
+                if changes['removed']:
+                    click.echo(f"\n  ➖ Removed: {len(changes['removed'])} columns")
+                    for col in changes['removed'][:5]:
+                        click.echo(f"     - {col['name']}")
+                    if len(changes['removed']) > 5:
+                        click.echo(f"     ... and {len(changes['removed']) - 5} more")
+                
+                if dry_run:
+                    click.echo("\n⚠️  Dry run - no changes applied\n")
+                else:
+                    # Apply changes (already done in sync_table)
+                    click.echo(f"\n✓ Updated query_gen_columns:")
+                    click.echo(f"  - Deleted: {stats['deleted']} rows")
+                    click.echo(f"  - Updated: {stats['updated']} rows")
+                    click.echo(f"  - Inserted: {stats['inserted']} rows")
+                    
+                    # Sync to Pinecone incrementally
+                    if total_changes > 0:
+                        click.echo("\n🔄 Syncing to Pinecone...")
+                        
+                        vs = VectorStore()
+                        embedder = EmbeddingGenerator()
+                        loader = BigQueryMetadataLoader()
+                        pinecone_sync = IncrementalPineconeSync(vs, embedder, loader)
+                        
+                        pinecone_stats = pinecone_sync.sync_columns_for_table(
+                            table_name, 
+                            changes, 
+                            verbose=verbose
+                        )
+                        
+                        click.echo(f"✓ Pinecone updated:")
+                        click.echo(f"  - Deleted: {pinecone_stats['deleted']} vectors")
+                        click.echo(f"  - Updated: {pinecone_stats['updated']} vectors")
+                        click.echo(f"  - Added: {pinecone_stats['added']} vectors")
+                        if pinecone_stats.get('skipped', 0) > 0:
+                            click.echo(f"  - Skipped: {pinecone_stats['skipped']} columns (no description)")
+                    
+                    # Update totals
+                    total_stats['deleted'] += stats['deleted']
+                    total_stats['updated'] += stats['updated']
+                    total_stats['inserted'] += stats['inserted']
+                    total_stats['tables'] += 1
+                    
+                    click.echo()
+                
+            except Exception as e:
+                click.echo(f"\n❌ Error syncing {table_name}: {e}\n", err=True)
+                if verbose:
+                    import traceback
+                    traceback.print_exc()
+                continue
+        
+        # Summary
+        if sync_all and not dry_run:
+            click.echo("="*70)
+            click.echo("SUMMARY")
+            click.echo("="*70)
+            click.echo(f"✓ Synced {total_stats['tables']} tables")
+            click.echo(f"  - Total deleted: {total_stats['deleted']}")
+            click.echo(f"  - Total updated: {total_stats['updated']}")
+            click.echo(f"  - Total inserted: {total_stats['inserted']}")
+            click.echo()
+        
+    except Exception as e:
+        click.echo(f"\n❌ Error: {e}", err=True)
+        if verbose:
+            import traceback
+            traceback.print_exc()
+        sys.exit(1)
+
+
 if __name__ == "__main__":
     cli()

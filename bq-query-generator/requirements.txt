@@ -21,3 +21,6 @@ pygments>=2.17.0
 
 # Utilities
 pyyaml>=6.0.0
+
+# BigQuery Integration
+google-cloud-bigquery>=3.11.0

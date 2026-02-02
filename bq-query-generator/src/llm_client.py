@@ -14,7 +14,7 @@ load_dotenv()
 class LLMClient:
     """Client for interacting with Claude AI to generate SQL queries."""
     
-    def __init__(self, model: str = "claude-3-opus-20240229", 
+    def __init__(self, model: str = "claude-3-haiku-20240307", 
                  temperature: float = 0.1, max_tokens: int = 2000):
         """
         Initialize Claude client.
