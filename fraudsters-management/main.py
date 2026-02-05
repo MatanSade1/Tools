@@ -1163,7 +1163,8 @@ def update_user_profiles_with_marker(distinct_ids: List[str]) -> tuple:
             
             # Check if the response indicates success
             response_text = response.text.strip()
-            if response_text == "1" or "success" in response_text.lower():
+            # Mixpanel returns "1" for simple success, or {"error":null,"status":1} for verbose success
+            if response_text == "1" or "success" in response_text.lower() or '"status":1' in response_text or '"status": 1' in response_text:
                 logger.info(f"✓ Batch {batch_num} processed successfully")
                 successful_updates += len(batch)
             else:
