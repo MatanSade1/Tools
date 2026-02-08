@@ -213,10 +213,10 @@ gcloud functions deploy rt-mp-collector \
 RT_MP_COLLECTOR_URL=$(gcloud functions describe rt-mp-collector --gen2 --region=$REGION --format="value(serviceConfig.uri)")
 echo "RT MP Collector URL: $RT_MP_COLLECTOR_URL"
 
-# RT MP Collector: Every 15 minutes (at :05, :20, :35, :50)
+# RT MP Collector: Every 10 minutes (at :05, :15, :25, :35, :45, :55)
 gcloud scheduler jobs create http rt-mp-collector-job \
     --location=$REGION \
-    --schedule="5,20,35,50 * * * *" \
+    --schedule="5,15,25,35,45,55 * * * *" \
     --uri="$RT_MP_COLLECTOR_URL" \
     --http-method=GET \
     --time-zone="UTC" \
