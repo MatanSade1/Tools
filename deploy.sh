@@ -182,6 +182,11 @@ RT_MP_DATASET=${RT_MP_DATASET:-peerplay}
 RT_MP_TABLE=${RT_MP_TABLE:-rt_mp_events}
 RT_MP_COLLECTOR_ENV_VARS="$RT_MP_COLLECTOR_ENV_VARS,RT_MP_DATASET=$RT_MP_DATASET,RT_MP_TABLE=$RT_MP_TABLE"
 
+# Add Google Sheets configuration for PRODUCTION
+# Production spreadsheet: https://docs.google.com/spreadsheets/d/1Z5wA9B0XSdxu4c5BauPYJfvqAmx7Jo_GA7ef-sNoNqg/edit
+RT_MP_CONFIG_SHEETS_ID="1Z5wA9B0XSdxu4c5BauPYJfvqAmx7Jo_GA7ef-sNoNqg"
+RT_MP_COLLECTOR_ENV_VARS="$RT_MP_COLLECTOR_ENV_VARS,RT_MP_CONFIG_SHEETS_ID=$RT_MP_CONFIG_SHEETS_ID"
+
 # Add Mixpanel secret (either from env var or Secret Manager name)
 if [ -n "$MIXPANEL_API_SECRET_NAME" ]; then
     RT_MP_COLLECTOR_ENV_VARS="$RT_MP_COLLECTOR_ENV_VARS,MIXPANEL_API_SECRET_NAME=$MIXPANEL_API_SECRET_NAME"
@@ -208,10 +213,10 @@ gcloud functions deploy rt-mp-collector \
 RT_MP_COLLECTOR_URL=$(gcloud functions describe rt-mp-collector --gen2 --region=$REGION --format="value(serviceConfig.uri)")
 echo "RT MP Collector URL: $RT_MP_COLLECTOR_URL"
 
-# RT MP Collector: Every 15 minutes
+# RT MP Collector: Every 15 minutes (at :05, :20, :35, :50)
 gcloud scheduler jobs create http rt-mp-collector-job \
     --location=$REGION \
-    --schedule="*/15 * * * *" \
+    --schedule="5,20,35,50 * * * *" \
     --uri="$RT_MP_COLLECTOR_URL" \
     --http-method=GET \
     --time-zone="UTC" \

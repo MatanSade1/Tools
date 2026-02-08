@@ -98,6 +98,21 @@ def parse_sheets_config_to_json(rows: List[List]) -> Dict:
         # Enabled
         if 'enabled' in header and 'enabled' not in col_map:
             col_map['enabled'] = i
+        # Table name (BigQuery table to query)
+        elif ('table_name' in header or header == 'table name') and 'table_name' not in col_map:
+            col_map['table_name'] = i
+        # Event name column (column in BQ table with event names)
+        elif ('event_name_column' in header or header == 'event name column') and 'event_name_column' not in col_map:
+            col_map['event_name_column'] = i
+        # Distinct ID column
+        elif ('distinct_id_column' in header or header == 'distinct id column') and 'distinct_id_column' not in col_map:
+            col_map['distinct_id_column'] = i
+        # Timestamp column
+        elif ('timestamp_column' in header or header == 'timestamp column') and 'timestamp_column' not in col_map:
+            col_map['timestamp_column'] = i
+        # Date column (partition column for cost optimization)
+        elif ('date_column' in header or header == 'date column') and 'date_column' not in col_map:
+            col_map['date_column'] = i
         # Aggregation type
         elif ('aggregation' in header and 'type' in header) or (header == 'aggregation' and 'aggregation_type' not in col_map):
             col_map['aggregation_type'] = i
@@ -213,6 +228,60 @@ def parse_sheets_config_to_json(rows: List[List]) -> Dict:
                 event['match_type'] = "exact"
         else:
             event['match_type'] = "exact"
+        
+        # Required: table_name (BigQuery table to query)
+        if 'table_name' in col_map:
+            table_idx = col_map['table_name']
+            if table_idx < len(row) and row[table_idx]:
+                event['table_name'] = str(row[table_idx]).strip()
+            else:
+                print(f"Warning: Row {row_idx} missing table_name, skipping")
+                continue
+        else:
+            print(f"Warning: No table_name column found in spreadsheet, skipping row {row_idx}")
+            continue
+        
+        # Required: event_name_column (column in BQ table that contains the event name)
+        if 'event_name_column' in col_map:
+            col_idx = col_map['event_name_column']
+            if col_idx < len(row) and row[col_idx]:
+                event['event_name_column'] = str(row[col_idx]).strip()
+            else:
+                print(f"Warning: Row {row_idx} missing event_name_column, skipping")
+                continue
+        else:
+            print(f"Warning: No event_name_column column found in spreadsheet, skipping row {row_idx}")
+            continue
+        
+        # Optional: distinct_id_column (default: "distinct_id")
+        if 'distinct_id_column' in col_map:
+            col_idx = col_map['distinct_id_column']
+            if col_idx < len(row) and row[col_idx]:
+                event['distinct_id_column'] = str(row[col_idx]).strip()
+            else:
+                event['distinct_id_column'] = "distinct_id"
+        else:
+            event['distinct_id_column'] = "distinct_id"
+        
+        # Optional: timestamp_column (default: "event_timestamp")
+        if 'timestamp_column' in col_map:
+            col_idx = col_map['timestamp_column']
+            if col_idx < len(row) and row[col_idx]:
+                event['timestamp_column'] = str(row[col_idx]).strip()
+            else:
+                event['timestamp_column'] = "event_timestamp"
+        else:
+            event['timestamp_column'] = "event_timestamp"
+        
+        # Optional: date_column (default: "event_date")
+        if 'date_column' in col_map:
+            col_idx = col_map['date_column']
+            if col_idx < len(row) and row[col_idx]:
+                event['date_column'] = str(row[col_idx]).strip()
+            else:
+                event['date_column'] = "event_date"
+        else:
+            event['date_column'] = "event_date"
         
         # Check for collection_frequency_minutes in this row or separate config
         if 'collection_frequency_minutes' in col_map:
@@ -380,6 +449,16 @@ def get_config_from_sheets(
                 col_map['event_name'] = i
         if 'enabled' in header and 'enabled' not in col_map:
             col_map['enabled'] = i
+        elif ('table_name' in header or header == 'table name') and 'table_name' not in col_map:
+            col_map['table_name'] = i
+        elif ('event_name_column' in header or header == 'event name column') and 'event_name_column' not in col_map:
+            col_map['event_name_column'] = i
+        elif ('distinct_id_column' in header or header == 'distinct id column') and 'distinct_id_column' not in col_map:
+            col_map['distinct_id_column'] = i
+        elif ('timestamp_column' in header or header == 'timestamp column') and 'timestamp_column' not in col_map:
+            col_map['timestamp_column'] = i
+        elif ('date_column' in header or header == 'date column') and 'date_column' not in col_map:
+            col_map['date_column'] = i
         elif ('aggregation' in header and 'type' in header) or (header == 'aggregation' and 'aggregation_type' not in col_map):
             col_map['aggregation_type'] = i
         elif ('threshold' in header or 'alert_threshold' in header) and 'alert_threshold' not in col_map:
