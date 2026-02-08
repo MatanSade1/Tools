@@ -1,0 +1,55 @@
+{
+  "events": [
+    {
+      "name": "impression_error_null_pointer_detected",
+      "enabled": true,
+      "source": "Mixpanel",
+      "aggregation_type": "count distinct users",
+      "alert_threshold": 25,
+      "alert_channel": "#data-alerts-critical",
+      "meaningful_name": "Null Pointer Error Detected",
+      "match_type": "exact"
+    },
+    {
+      "name": "payment_failed",
+      "enabled": true,
+      "source": "BigQuery",
+      "table_name": "yotam-395120.peerplay.processed_payments",
+      "event_name_column": "event_name",
+      "distinct_id_column": "distinct_id",
+      "timestamp_column": "event_timestamp",
+      "date_column": "event_date",
+      "aggregation_type": "count distinct users",
+      "alert_threshold": 10,
+      "alert_channel": "#alerts-critical",
+      "meaningful_name": "High Payment Failure Rate",
+      "match_type": "exact"
+    },
+    {
+      "name": "impression_liveops_not_found",
+      "enabled": false,
+      "source": "Mixpanel",
+      "aggregation_type": "count distinct users",
+      "alert_threshold": 3,
+      "alert_channel": "#data-alerts-critical",
+      "meaningful_name": "impression_liveops_not_found detected",
+      "match_type": "prefix"
+    },
+    {
+      "name": "error_",
+      "enabled": false,
+      "source": "BigQuery",
+      "table_name": "yotam-395120.peerplay.app_errors",
+      "event_name_column": "error_type",
+      "distinct_id_column": "user_id",
+      "timestamp_column": "created_at",
+      "date_column": "partition_date",
+      "aggregation_type": "count distinct users",
+      "alert_threshold": 50,
+      "alert_channel": "#data-alerts-non-critical",
+      "meaningful_name": "Error Events (Prefix Match)",
+      "match_type": "prefix"
+    }
+  ],
+  "collection_frequency_minutes": 15
+}

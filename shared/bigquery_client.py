@@ -516,6 +516,78 @@ def get_player_dates(distinct_ids: List[str]) -> Dict[str, Dict]:
         return {}
 
 
+def query_custom_bq_event_count(
+    table_name: str,
+    event_name_column: str,
+    event_name: str,
+    distinct_id_column: str,
+    timestamp_column: str,
+    date_column: str,
+    lookback_minutes: int,
+    match_type: str = "exact"
+) -> int:
+    """
+    Query a custom BigQuery table with partitioning to minimize costs.
+    
+    Args:
+        table_name: Full table name (e.g., "yotam-395120.peerplay.processed_events")
+        event_name_column: Column name that contains the event name
+        event_name: Event name to filter on
+        distinct_id_column: Column name that contains the distinct user ID
+        timestamp_column: Column name that contains the event timestamp
+        date_column: Date partition column name for cost optimization
+        lookback_minutes: Number of minutes to look back
+        match_type: "exact" for exact match, "prefix" for prefix matching
+    
+    Returns:
+        Count of distinct users matching the criteria
+    """
+    client = get_bigquery_client()
+    
+    # Handle match type logic
+    if match_type == "exact":
+        event_filter = f"{event_name_column} = @event_name"
+    else:  # prefix
+        event_filter = f"{event_name_column} LIKE CONCAT(@event_name, '%')"
+    
+    # Query optimized with date partition and timestamp window
+    query = f"""
+        SELECT COUNT(DISTINCT {distinct_id_column}) as count
+        FROM `{table_name}`
+        WHERE {date_column} >= CURRENT_DATE() - 1  -- Safety buffer for timezones
+        AND {timestamp_column} >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @lookback_minutes MINUTE)
+        AND {event_filter}
+    """
+    
+    job_config = bigquery.QueryJobConfig(
+        query_parameters=[
+            bigquery.ScalarQueryParameter("event_name", "STRING", event_name),
+            bigquery.ScalarQueryParameter("lookback_minutes", "INT64", lookback_minutes),
+        ]
+    )
+    
+    try:
+        print(f"Executing BigQuery query on {table_name}")
+        print(f"  Filter: {event_name_column} {match_type} '{event_name}'")
+        print(f"  Lookback: {lookback_minutes} minutes")
+        
+        query_job = client.query(query, job_config=job_config)
+        results = query_job.result()
+        
+        for row in results:
+            count = row.count if row.count is not None else 0
+            print(f"  Result: {count} distinct users")
+            return count
+            
+    except Exception as e:
+        print(f"Error querying custom BigQuery table {table_name}: {e}")
+        import traceback
+        traceback.print_exc()
+        return 0
+    
+    return 0
+
+
 def insert_gdpr_requests(requests: List[Dict]):
     """
     Insert GDPR deletion requests into BigQuery.
