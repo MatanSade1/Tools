@@ -6,7 +6,7 @@ A Cloud Run service that automates the fraud detection and management process, c
 
 This service executes a 4-step fraud detection process:
 
-1. **Calculate potential_fraudsters table** - Analyzes all users using 14 fraud detection patterns
+1. **Calculate potential_fraudsters table** - Analyzes all users using 15 fraud detection patterns
 2. **Calculate offer_wall_progression_cheaters table** - Filters potential fraudsters for offerwall cheaters
 3. **Update fraudsters table** - Updates the main fraudsters table with platform/date-specific logic
 4. **Update Mixpanel cohort** - Updates user profiles in Mixpanel with fraudster markers
@@ -16,7 +16,7 @@ This service executes a 4-step fraud detection process:
 - **Service Name**: `fraudsters-management`
 - **Project ID**: `yotam-395120`
 - **Region**: `us-central1`
-- **Service Account**: `fraudsters-management@yotam-395120.iam.gserviceaccount.com`
+- **Service Account**: `bigquery-alerts-to-slack@yotam-395120.iam.gserviceaccount.com`
 - **Schedule**: Daily at 11AM UTC via Cloud Scheduler
 - **Runtime**: Python 3.10
 - **Memory**: 2Gi
@@ -25,7 +25,7 @@ This service executes a 4-step fraud detection process:
 
 ## Features
 
-- **Error Alerting**: Sends Slack alerts to `#data-alerts-critical` when any query fails
+- **Error Alerting**: Sends Slack alerts to `#matan-coralogix-alerts` when any query fails
 - **Audit Logging**: Logs all step start/end times to `process_audit_log` table in BigQuery
 - **Run ID Tracking**: Each execution has a unique UUID for correlation
 - **Resilient Execution**: Continues processing remaining steps even if one fails
@@ -33,22 +33,33 @@ This service executes a 4-step fraud detection process:
 
 ## Fraud Detection Patterns
 
-The service detects 14 different fraud patterns:
+The service detects 15 different fraud patterns:
 
-1. Fast progression (chapter 20+ in <24h without purchase)
-2. Excessive harvests (>21 harvests per day)
-3. Suspicious purchases (price = 0.01)
-4. Rapid purchases (consecutive purchases 1-7 seconds apart on Apple)
-5. Purchase flow anomalies (consecutive successful purchases without clicks)
-6. High balance violations (>245K credits or >850K metapoints)
-7. Negative balance violations
-8. Large jump violations (40K+ credits or 100K+ metapoints without reward events)
-9. Privacy screen abandonment
-10. Rapid chapter progression with low credit spend
-11. Refund abuse (>25% refund rate with >5 purchases)
-12. High tutorial balance without purchases
-13. Multiple purchases in Chapter 1
-14. Duplicate transaction ID usage
+1. **Fast Progression** - Chapter 20+ in <24h without purchase
+2. **Excessive Harvests** - ≥22 net harvests per day on >2 different days
+3. **Suspicious Purchases** - Purchases with price = $0.01
+4. **Rapid Purchases** - Consecutive purchases 1-7 seconds apart (Apple only)
+5. **Purchase Flow Anomalies** - Consecutive successful purchases without clicks
+6. **High Balance Violations** - >245K credits or >850K metapoints
+7. **Negative Balance Violations** - Negative credit or metapoint balance
+8. **Large Jump Violations** - 40K+ credits or 100K+ metapoints without reward events (checks current + next 2 events)
+9. **Privacy Screen Abandonment** - Privacy impression without agree click
+10. **Rapid Chapter Progression** - >5 chapters/day with <500 credits/chapter (DISABLED)
+11. **Refund Abuse** - >25% refund rate with >5 purchases (Android)
+12. **High Tutorial Balance** - >4,950 credits in chapters 1-3 without purchases
+13. **Multiple Chapter 1 Purchases** - >1 purchase in chapter 1 (installed after 2025-03-01)
+14. **Duplicate Transaction ID** - Same transaction_id/google_order_number/checkout_id used multiple times (Apple, Google Play, Stash)
+15. **Penny Purchases** - 2+ purchases at exactly $0.01 price
+
+## Platform-Specific Rules
+
+### Apple Users
+- **Installed OR last purchased on/after 2025-08-13**: Only `duplicate_transaction_flag` or `penny_purchase_flag`
+- **Installed AND last purchased before 2025-08-13**: All patterns apply
+
+### Android Users
+- **Installed OR last purchased on/after 2025-04-17**: Only `duplicate_transaction_flag` or `penny_purchase_flag`
+- **Installed AND last purchased before 2025-04-17**: All patterns except Apple-specific (3, 4, 5)
 
 ## Deployment
 
@@ -78,7 +89,7 @@ gcloud run deploy fraudsters-management \
   --source . \
   --region us-central1 \
   --project yotam-395120 \
-  --service-account fraudsters-management@yotam-395120.iam.gserviceaccount.com \
+  --service-account bigquery-alerts-to-slack@yotam-395120.iam.gserviceaccount.com \
   --set-env-vars GCP_PROJECT_ID=yotam-395120 \
   --allow-unauthenticated \
   --memory 2Gi \
@@ -131,7 +142,7 @@ The service account needs:
 
 When any step fails:
 1. Error is logged to Cloud Logging
-2. Slack alert is sent to `#data-alerts-critical` with:
+2. Slack alert is sent to `#matan-coralogix-alerts` with:
    - Step number
    - Error message
    - Run ID
@@ -144,7 +155,7 @@ When any step fails:
 
 - **Cloud Logging**: All logs are written to Cloud Logging with run_id for correlation
 - **Audit Table**: Step start/end times logged to `yotam-395120.peerplay.process_audit_log`
-- **Slack Alerts**: Error notifications sent to `#data-alerts-critical`
+- **Slack Alerts**: Error notifications sent to `#matan-coralogix-alerts`
 
 ## Local Testing
 
@@ -164,16 +175,40 @@ flask run --host=0.0.0.0 --port=8080
 
 ## Code Structure
 
-- `main.py` - Main service code with all 4 steps
+- `main.py` - Main service code with all 4 steps (production)
+- `main_dev.py` - Development version targeting staging tables
 - `requirements.txt` - Python dependencies
 - `deploy.sh` - Deployment script
 - `README.md` - This file
+- `shared/` - Shared utilities (bigquery_client, slack_client)
+
+## Fraudsters Table Schema
+
+| Column | Type | Description |
+|--------|------|-------------|
+| distinct_id | STRING | Unique user identifier |
+| manual_identification_fraud_purchase_flag | INTEGER | Manual fraud identification (0/1) |
+| fast_progression_flag | INTEGER | Pattern 1 (0/1) |
+| excessive_harvests_flag | INTEGER | Pattern 2 (0/1) |
+| suspicious_purchase_flag | INTEGER | Pattern 3 (0/1) |
+| rapid_purchases_flag | INTEGER | Pattern 4 (0/1) |
+| purchase_flow_anomaly_flag | INTEGER | Pattern 5 (0/1) |
+| high_balance_flag | INTEGER | Pattern 6 (0/1) |
+| negative_balance_flag | INTEGER | Pattern 7 (0/1) |
+| large_jump_flag | INTEGER | Pattern 8 (0/1) |
+| privacy_abandonment_flag | INTEGER | Pattern 9 (0/1) |
+| rapid_chapter_progression_flag | INTEGER | Pattern 10 (0/1) - DISABLED |
+| refund_abuse_flag | INTEGER | Pattern 11 (0/1) |
+| high_tutorial_balance_flag | INTEGER | Pattern 12 (0/1) |
+| multiple_chapter1_purchases_flag | INTEGER | Pattern 13 (0/1) |
+| duplicate_transaction_flag | INTEGER | Pattern 14 (0/1) |
+| penny_purchase_flag | INTEGER | Pattern 15 (0/1) |
 
 ## Notes
 
 - The service uses Application Default Credentials (ADC) in Cloud Run
-- Local execution requires explicit credentials file
-- Mixpanel cohort marker is consistent: `fraudster_cohort_active_v7`
+- Local execution requires explicit credentials file with Drive scopes
+- Mixpanel cohort marker is consistent: `fraudster_cohort_active_v8`
 - All BigQuery queries are extracted from the original Jupyter notebook
 - Service processes steps sequentially, but continues on errors
-
+- Pattern 14 now supports Apple, Google Play, and Stash payment platforms
