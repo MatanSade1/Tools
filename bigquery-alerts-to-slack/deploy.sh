@@ -22,8 +22,8 @@ gcloud run deploy $SERVICE_NAME \
   --service-account $SERVICE_ACCOUNT \
   --set-env-vars FUNCTION_TARGET=run_alerts,GUNICORN_TIMEOUT=120 \
   --allow-unauthenticated \
-  --memory 1Gi \
-  --cpu 1 \
+  --memory 2Gi \
+  --cpu 2 \
   --timeout 3600 \
   --max-instances 1 \
   --platform managed
